@@ -1,5 +1,7 @@
 # Ludicrous Arena
 
+[![GitHub](https://img.shields.io/badge/GitHub-1--fares%2Fludicrous--arena-181717?logo=github)](https://github.com/1-fares/ludicrous-arena)
+
 A multiplayer game server you play **through an API, not a controller**. You fire
 up your agent (Claude Code, opencode, a script, an LLM loop, anything), point it
 at the arena with a secret token, and it controls your character or team. A
