@@ -52,6 +52,7 @@ Config (all optional):
     cell_bonus:      float = 0.05  score for each new cell entered (rewards exploring)
     territory_cap:   float = 4.0   most you can earn from new ground (kills still decide)
     expose_ticks:    int = 30      ticks idle in one cell before you are exposed
+    drop_after:      int = 150     ticks with no action before a dropped client is downed (0=off)
 """
 
 from __future__ import annotations
@@ -102,6 +103,8 @@ META = GameMeta(
                               "description": "Most a player can earn from new ground over the match, so eliminations still decide the game."},
             "expose_ticks": {"type": "integer", "default": 30, "minimum": 0, "maximum": 6000,
                              "description": "Ticks of staying in one cell before you are exposed: your position is revealed to every living enemy (through walls) until you move. 0 disables it."},
+            "drop_after": {"type": "integer", "default": 150, "minimum": 0, "maximum": 100000,
+                           "description": "Ticks with no submitted action before a player is treated as dropped: they are downed for the round so a gone client cannot freeze the game or be farmed. 0 disables it."},
         },
     },
     action_schema={
@@ -204,6 +207,8 @@ class Fighter:
     px: int = -1                 # cell at the previous tick, to detect movement
     py: int = -1
     visited: list = field(default_factory=list)   # [[x,y], ...] cells already scored for territory
+    last_act: int = 0            # tick of the last submitted action; stale => client gone
+    inactive: bool = False       # dropped (no actions for drop_after ticks); downed so the round resolves
 
 
 @dataclass
@@ -345,7 +350,8 @@ class Skirmish:
             if free:
                 sx, sy = free[(i * 7) % len(free)]
         state.fighters[slot.player_id] = Fighter(name=slot.display_name, x=sx, y=sy,
-                                                 facing=i % 4, hearts=state.cfg["hearts"])
+                                                 facing=i % 4, hearts=state.cfg["hearts"],
+                                                 last_act=state.tick)
 
     # -- spatial helpers ---------------------------------------------------
 
@@ -411,6 +417,7 @@ class Skirmish:
 
     def apply(self, state: State, player_id: str, action: dict[str, Any]) -> None:
         f = state.fighters[player_id]
+        f.last_act = state.tick      # any action (incl. wait) proves the client is alive
         t = action["type"]
         if t == "turn":
             f.facing = (f.facing + {"left": -1, "right": 1, "around": 2}[action["to"]]) % 4
@@ -435,11 +442,18 @@ class Skirmish:
     def tick(self, state: State, dt: float) -> None:
         cfg = state.cfg
         expose = cfg["expose_ticks"]
+        drop = cfg["drop_after"]
         for f in state.fighters.values():
             if f.move_cd > 0:
                 f.move_cd -= 1
             if f.fire_cd > 0:
                 f.fire_cd -= 1
+            # Drop a gone client: no action for drop_after ticks downs the fighter so
+            # the round resolves and an absent body cannot be farmed. The resident
+            # client re-attaches and plays the next round.
+            if drop and f.alive and state.phase == "fighting" and state.tick - f.last_act >= drop:
+                f.alive = False
+                f.inactive = True
             # Idle tracking: staying in one cell raises idle; moving resets it. Past
             # expose_ticks the fighter is "exposed" and broadcast to all enemies.
             if (f.x, f.y) == (f.px, f.py):
@@ -508,6 +522,7 @@ class Skirmish:
             f.alive = True
             f.move_cd = f.fire_cd = 0
             f.idle, f.exposed, f.px, f.py = 0, False, sx, sy   # frags/terr persist across rounds
+            f.last_act, f.inactive = state.tick, False         # fresh drop grace each round
         state.bullets = []
         state.round += 1
         state.phase = "fighting"
@@ -608,6 +623,7 @@ class Skirmish:
                 {"id": pid, "name": f.name, "x": f.x, "y": f.y,
                  "dx": DIRS[f.facing][0], "dy": DIRS[f.facing][1],
                  "hearts": f.hearts, "alive": f.alive, "exposed": f.exposed,
+                 "inactive": f.inactive,
                  "score": round(_points(f, state.cfg), 2), "frags": f.frags}
                 for pid, f in state.fighters.items()
             ],

@@ -28,6 +28,7 @@ playing, cost proportional to actual reads and actions when they are.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -74,13 +75,24 @@ class Engine:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def create_match(self, game_id: str, config: dict[str, Any], autostart: bool) -> MatchInfo:
+    def create_match(self, game_id: str, config: dict[str, Any], autostart: bool,
+                     room: Optional[str] = None) -> MatchInfo:
         game = registry.get(game_id)
         validate_config(game.meta, config)  # reject out-of-range config before it can hang/crash a start
-        match_id = uuid.uuid4().hex[:12]
+        if room:
+            # Named room: a stable, deterministic id reused across a whole session.
+            match_id = "room-" + hashlib.sha256(room.encode()).hexdigest()[:10]
+            existing = self._store.get_match_meta(match_id)
+            if existing is not None:
+                info = MatchInfo.model_validate(existing[0])
+                if info.phase == MatchPhase.finished:
+                    return self.reset_match(match_id)   # reuse the room, fresh round 1
+                return info                              # lobby/running: hand it back
+        else:
+            match_id = uuid.uuid4().hex[:12]
         info = MatchInfo(
             match_id=match_id, game_id=game_id, phase=MatchPhase.lobby,
-            config=config, autostart=autostart, players=[],
+            config=config, autostart=autostart, players=[], room=room,
             max_players=game.meta.max_players, created_at=_now_iso(),
         )
         self._store.put_match_meta(match_id, info.model_dump(mode="json"), expected_version=None)

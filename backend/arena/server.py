@@ -189,7 +189,7 @@ def create_match(req: CreateMatchRequest,
     `min_players` have joined; otherwise start it with `/start`. `config` is
     validated against the game's `config_schema`; out-of-range values give 422."""
     try:
-        return ENGINE.create_match(req.game_id, req.config, req.autostart)
+        return ENGINE.create_match(req.game_id, req.config, req.autostart, req.room)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
     except ValueError as e:

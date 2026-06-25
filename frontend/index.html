@@ -18,6 +18,11 @@
            border: 1px solid #243049; border-radius: 6px; padding: 5px 8px; font: inherit; }
     #reset { background: #2a1418; color: #ff9a9a; border-color: #5a2730; }
     #reset:hover { background: #3a1a20; }
+    #adminbar { display: inline-flex; gap: 6px; align-items: center; pointer-events: auto; }
+    #adminbar .pill { font-size: 10px; letter-spacing: 1px; color: #ffb14a; border: 1px solid #5a4520;
+           background: #2a2210; border-radius: 4px; padding: 2px 6px; }
+    #hud button[disabled] { opacity: .4; cursor: default; }
+    #follow.on { color: #9cff7c; border-color: #2f5a30; }
     #status { margin-left: auto; color: #6b7790; }
     #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 180px;
            background: #0b0e14cc; border: 1px solid #1c2538; border-radius: 8px; padding: 10px 12px; }
@@ -36,6 +41,7 @@
     #banner { position: fixed; inset: 0; display: none; place-items: center; pointer-events: none; }
     #banner div { background: #0b0e14ee; border: 1px solid #2a3550; border-radius: 12px;
            padding: 24px 40px; font-size: 20px; text-align: center; }
+    #banner .bsub { font-size: 13px; color: #9fb0cc; margin-top: 6px; border: 0; padding: 0; background: none; }
   </style>
 </head>
 <body>
@@ -43,15 +49,22 @@
   <div id="hud">
     <span class="brand">LUDICROUS ARENA</span>
     <select id="matchSelect"><option value="">select a match…</option></select>
-    <button id="refresh">refresh</button>
-    <button id="reset" hidden>reset match</button>
+    <button id="follow" title="Auto-follow the live match">live ▸</button>
+    <span id="adminbar" hidden>
+      <span class="pill">ADMIN</span>
+      <button id="create" title="Create a new skirmish match">create</button>
+      <button id="start" title="Start the selected match" hidden>start</button>
+      <button id="reset" title="Restart this match at round 1">reset</button>
+      <button id="brk" title="Open an intermission break">break</button>
+      <button id="clear" title="Delete finished matches">clear</button>
+    </span>
     <span id="status">idle</span>
   </div>
   <div id="scoreboard" hidden>
     <h3>Scoreboard</h3><div id="scores"></div>
     <div id="healthwrap" hidden><h3 style="margin-top:12px">Health</h3><div id="health"></div></div>
   </div>
-  <div id="hint">drag to rotate · scroll to zoom · right-drag to pan</div>
+  <div id="hint">You are spectating &middot; agents play via the API &middot; drag to rotate &middot; scroll to zoom</div>
   <div id="banner"><div id="bannerText"></div></div>
 
   <!-- three.js as an ES module from a pinned CDN; no build step, keeping the
@@ -62,6 +75,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=13"></script>
+  <script type="module" src="./js/viewer.js?v=14"></script>
 </body>
 </html>

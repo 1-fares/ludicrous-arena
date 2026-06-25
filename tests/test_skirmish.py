@@ -148,10 +148,11 @@ def test_vision_only_forward_and_blocked_by_walls():
 
 
 def test_no_timeout_round_does_not_end_on_the_clock():
-    # With round_limit 0 (the default), a round ends only by combat. Two idle
-    # survivors keep fighting; the clock must not end the round.
+    # With round_limit 0, the clock must not end a round. Disable drop_after here so
+    # the (action-less) test fighters are not downed for inactivity; this isolates
+    # the round-limit behaviour from the drop-out behaviour.
     g = _game()
-    st = g.init_state({"grid": 11, "round_limit": 0}, _slots(2))
+    st = g.init_state({"grid": 11, "round_limit": 0, "drop_after": 0}, _slots(2))
     for _ in range(1200):          # far past any old timeout default
         g.tick(st, 0.1)
     assert st.phase == "fighting" and st.round == 1
@@ -252,3 +253,15 @@ def test_state_json_roundtrip():
         g.tick(st, 0.1)
     restored = g.decode_state(json.loads(json.dumps(g.encode_state(st))))
     assert g.render(restored) == g.render(st)
+
+
+def test_drop_after_downs_an_inactive_fighter():
+    # A client that submits no action for drop_after ticks is downed, so a gone
+    # player cannot freeze the round or be farmed. An active player is untouched.
+    g = _game()
+    st = g.init_state({"grid": 11, "drop_after": 3, "score_to_win": 10}, _slots(2))
+    for _ in range(5):
+        g.apply(st, "p1", {"type": "wait"})   # p1 stays active; p2 never acts
+        g.tick(st, 0.1)
+    assert st.fighters["p2"].inactive and not st.fighters["p2"].alive
+    assert st.fighters["p1"].alive

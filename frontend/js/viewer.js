@@ -528,20 +528,24 @@ function renderHealth(rows) {
   }).join("");
 }
 
-// ---- match selection + polling -------------------------------------------
+// ---- match selection, auto-follow director, polling ----------------------
 let pollTimer = null, activeGame = null, statusExtra = "";
-let currentMatch = null, currentGame = null;   // what the viewer is connected to
+let currentMatch = null, currentGame = null, autoFollow = true, adminToken = null;
+const matchSelect = document.getElementById("matchSelect");
+const gameMeta = {};   // game_id -> {min, title}
 
-async function loadMatches() {
-  const sel = document.getElementById("matchSelect");
-  const keep = sel.value;
+function titleFor(g) { return gameMeta[g]?.title || (g ? g[0].toUpperCase() + g.slice(1) : "-"); }
+
+async function loadGameMeta() {
   try {
-    const matches = await (await fetch(`${API}/v1/matches`)).json();
-    sel.innerHTML = `<option value="">select a match…</option>` + matches.map(m =>
-      `<option value="${m.match_id}" data-game="${m.game_id}">${esc(m.game_id)} · ${m.match_id.slice(0, 6)} · ${m.phase}</option>`).join("");
-    if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
-    statusEl.textContent = `${matches.length} match(es)`;
-  } catch (e) { statusEl.textContent = `cannot reach API at ${API}`; }
+    for (const g of await (await fetch(`${API}/v1/games`)).json())
+      gameMeta[g.id] = { min: g.min_players, title: g.title };
+  } catch (e) { /* defaults are fine */ }
+}
+
+function setBanner(html) {
+  if (html) { bannerText.innerHTML = html; banner.style.display = "grid"; }
+  else { banner.style.display = "none"; }
 }
 
 function connect(matchId, gameId) {
@@ -549,38 +553,53 @@ function connect(matchId, gameId) {
   clearRoot();
   activeGame = gameId; statusExtra = "";
   currentMatch = matchId || null; currentGame = gameId || null;
-  banner.style.display = "none";
+  setBanner(null);
   if (!matchId) return;
   const r = RENDERERS[gameId];
   if (!r) { statusEl.textContent = `no renderer for game '${gameId}'`; return; }
-  let ended = false;
+
   async function poll() {
     try {
-      const resp = await fetch(`${API}/v1/matches/${matchId}/scene`);
-      if (!resp.ok) {
-        statusEl.textContent = resp.status === 404 ? "match no longer available" : `error ${resp.status}`;
-        if (resp.status === 404 && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      const [sceneR, infoR] = await Promise.all([
+        fetch(`${API}/v1/matches/${matchId}/scene`),
+        fetch(`${API}/v1/matches/${matchId}`),
+      ]);
+      if (sceneR.status === 404 || infoR.status === 404) {
+        currentMatch = null;                       // gone (deleted/GC'd): the director repicks
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         return;
       }
-      const frame = await resp.json();
+      const frame = await sceneR.json();
+      const info = await infoR.json();
+      updateAdminControls(info);
+      // Lobby, or not yet started: a legible roster card, never a blank board.
+      if (info.phase === "lobby" || !frame.scene) {
+        const min = gameMeta[gameId]?.min ?? 2;
+        const names = info.players.map(p => esc(p.display_name)).join(", ") || "-";
+        const need = info.players.length >= min ? "ready to start" : `waiting for ${min - info.players.length} more`;
+        setBanner(`<b>${esc(titleFor(gameId))}</b><div class="bsub">Lobby · ${info.players.length}/${info.max_players} joined · ${need}</div><div class="bsub">${names}</div>`);
+        statusEl.textContent = `${gameId} · lobby · ${info.players.length}/${info.max_players}`;
+        scoreboard.hidden = true;
+        return;
+      }
       if (frame.scene) r.update(frame.scene);
-      else { statusEl.textContent = `${gameId} · ${frame.phase} · waiting for players…`; return; }
-      statusEl.textContent = `${gameId} · tick ${frame.tick} · ${frame.phase}${statusExtra ? " · " + statusExtra : ""}`;
-      const finished = frame.phase === "finished";
-      if (finished && !ended) {
-        ended = true;
+      if (info.phase === "finished") {
         const res = frame.result || {};
-        // winners are match-local player_ids; map them to display names.
         const players = frame.scene?.players || [];
         const nameOf = (id) => players.find(p => p.id === id)?.name || id;
         const w = (res.winners || []).map(nameOf);
-        bannerText.textContent = w.length ? `Winner: ${w.join(", ")} (${res.reason})` : `Match over (${res.reason})`;
-        banner.style.display = "grid";
-        // Keep polling: if the match is reset (admin), the next frame flips back to
-        // running and we drop the banner and resume live, no reload needed.
-      } else if (!finished && ended) {
-        ended = false;
-        banner.style.display = "none";
+        if (info.break_until && info.break_until * 1000 > Date.now()) {
+          const secs = Math.max(0, Math.round(info.break_until - Date.now() / 1000));
+          const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+          setBanner(`<b>Intermission</b><div class="bsub">Next round in ${t} · agents are improving</div>${info.break_note ? `<div class="bsub">${esc(info.break_note)}</div>` : ""}`);
+          statusEl.textContent = `${gameId} · break · next round ${t}`;
+        } else {
+          setBanner(w.length ? `<b>Winner: ${esc(w.join(", "))}</b><div class="bsub">${esc(res.reason || "")}</div>` : `<b>Match over</b>`);
+          statusEl.textContent = `${gameId} · finished · ${w.join(", ") || "-"}`;
+        }
+      } else {
+        setBanner(null);
+        statusEl.textContent = `${titleFor(gameId)} · ${statusExtra || "running"} · LIVE`;
       }
     } catch (e) { statusEl.textContent = "reconnecting…"; }
   }
@@ -588,64 +607,124 @@ function connect(matchId, gameId) {
   pollTimer = setInterval(poll, 1000 / POLL_HZ);
 }
 
-document.getElementById("matchSelect").addEventListener("change", (e) => {
+const followBtn = document.getElementById("follow");
+matchSelect.addEventListener("change", (e) => {
+  autoFollow = false; followBtn.classList.remove("on");      // a manual pick pins the match
   const opt = e.target.selectedOptions[0];
   connect(e.target.value, opt?.dataset.game);
 });
-document.getElementById("refresh").addEventListener("click", loadMatches);
-setInterval(() => { if (!pollTimer) loadMatches(); }, 4000);
+followBtn.addEventListener("click", () => {
+  autoFollow = true; followBtn.classList.add("on"); director();   // hand control back to the director
+});
 
-// Admin reset: the button shows only when an admin token is stored in this browser.
-// Provide it once via the URL fragment (#admin=<token>); it is moved to localStorage
-// and stripped from the address bar. The server still enforces the token, so the
-// button being hidden is convenience, not the security boundary.
+function bestMatch(ms) {
+  return ms.find(m => m.phase === "running") || ms.find(m => m.phase === "finished") || ms[0] || null;
+}
+
+// The director keeps the dropdown fresh and, while auto-following, connects to the
+// best live match, advancing to the next game on its own. It never yanks a spectator
+// who has pinned a match (manual pick or ?match=).
+async function director() {
+  let matches;
+  try { matches = await (await fetch(`${API}/v1/matches`)).json(); }
+  catch (e) { statusEl.textContent = `cannot reach API at ${API}`; return; }
+  const keep = matchSelect.value;
+  matchSelect.innerHTML = `<option value="">select a match…</option>` + matches.map(m =>
+    `<option value="${m.match_id}" data-game="${m.game_id}">${esc(m.game_id)} · ${m.match_id.slice(0, 6)} · ${m.phase} · ${m.players.length}p</option>`).join("");
+  if ([...matchSelect.options].some(o => o.value === keep)) matchSelect.value = keep;
+  if (!autoFollow) return;
+  const best = bestMatch(matches);
+  if (best) {
+    if (best.match_id !== currentMatch) { matchSelect.value = best.match_id; connect(best.match_id, best.game_id); }
+  } else if (!currentMatch) {
+    setBanner(`<b>LUDICROUS ARENA</b><div class="bsub">No matches running. This page connects automatically when one begins.</div>`);
+    scoreboard.hidden = true; statusEl.textContent = "waiting for a match";
+  }
+}
+setInterval(director, 3000);
+
+// ---- admin controls (revealed by an admin token) -------------------------
+function updateAdminControls(info) {
+  const startBtn = document.getElementById("start");   // start only makes sense in a lobby
+  if (startBtn) startBtn.hidden = !(adminToken && info && info.phase === "lobby");
+}
+
+async function adminCall(method, path, body) {
+  const resp = await fetch(`${API}${path}`, {
+    method, headers: { Authorization: "Bearer " + adminToken, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (resp.status === 401 || resp.status === 403) {
+    statusEl.textContent = "admin token rejected";
+    localStorage.removeItem("arena_admin_token");
+    document.getElementById("adminbar").hidden = true; adminToken = null;
+  }
+  return resp;
+}
+
+// Admin token is provided once via the URL fragment (#admin=<token>); it is moved to
+// localStorage and stripped from the bar. The server enforces it, so the panel being
+// hidden is only convenience, not the security boundary.
 (function setupAdmin() {
   const ADMIN_KEY = "arena_admin_token";
   const fromHash = new URLSearchParams(location.hash.slice(1)).get("admin");
-  if (fromHash) {
-    localStorage.setItem(ADMIN_KEY, fromHash);
-    history.replaceState(null, "", location.pathname + location.search);
-  }
-  const token = localStorage.getItem(ADMIN_KEY);
-  const btn = document.getElementById("reset");
-  if (!token || !btn) return;
-  btn.hidden = false;
-  btn.addEventListener("click", async () => {
-    if (!currentMatch) { statusEl.textContent = "select a match first"; return; }
-    btn.disabled = true;
-    try {
-      const resp = await fetch(`${API}/v1/matches/${currentMatch}/reset`,
-        { method: "POST", headers: { Authorization: "Bearer " + token } });
-      if (resp.ok) {
-        connect(currentMatch, currentGame);   // resume polling from the fresh world
-        statusEl.textContent = "match reset";
-      } else if (resp.status === 401 || resp.status === 403) {
-        statusEl.textContent = "admin token rejected";
-        localStorage.removeItem(ADMIN_KEY); btn.hidden = true;
-      } else {
-        statusEl.textContent = `reset failed (${resp.status})`;
-      }
-    } catch (e) { statusEl.textContent = "reset failed"; }
-    btn.disabled = false;
+  if (fromHash) { localStorage.setItem(ADMIN_KEY, fromHash); history.replaceState(null, "", location.pathname + location.search); }
+  adminToken = localStorage.getItem(ADMIN_KEY);
+  const bar = document.getElementById("adminbar");
+  if (!adminToken || !bar) return;
+  bar.hidden = false;
+  const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
+  on("create", async () => {
+    const r = await adminCall("POST", "/v1/matches", { game_id: "skirmish", autostart: false });
+    if (r.ok) {
+      const m = await r.json();
+      autoFollow = false; followBtn.classList.remove("on");
+      matchSelect.value = m.match_id; connect(m.match_id, m.game_id);
+      statusEl.textContent = "match created; waiting for players";
+    }
+  });
+  on("start", async () => {
+    if (!currentMatch) return;
+    const r = await adminCall("POST", `/v1/matches/${currentMatch}/start`);
+    statusEl.textContent = r.ok ? "started" : `start failed (${r.status})`;
+  });
+  on("reset", async () => {
+    if (currentMatch && confirm("Reset this match to round 1 for all players?")) {
+      const r = await adminCall("POST", `/v1/matches/${currentMatch}/reset`);
+      if (r.ok) connect(currentMatch, currentGame);
+    }
+  });
+  on("brk", async () => {
+    if (!currentMatch) return;
+    const mins = parseFloat(prompt("Break length in minutes?", "5") || "0");
+    if (mins > 0) {
+      await adminCall("POST", `/v1/matches/${currentMatch}/break`,
+        { minutes: mins, note: prompt("Note for agents (optional)?", "") || null });
+      statusEl.textContent = `break: ${mins} min`;
+    }
+  });
+  on("clear", async () => {
+    const ms = await (await fetch(`${API}/v1/matches?phase=finished`)).json();
+    for (const m of ms) await adminCall("DELETE", `/v1/matches/${m.match_id}`);
+    statusEl.textContent = `cleared ${ms.length} finished`; director();
   });
 })();
 
 const wantMatch = new URLSearchParams(location.search).get("match");
 (async function init() {
-  await loadMatches();
-  const sel = document.getElementById("matchSelect");
-  let opt = wantMatch ? [...sel.options].find(o => o.value === wantMatch) : null;
-  // No ?match= given: auto-connect so the bare domain "just works" for spectators.
-  // Prefer a running game, then the most recent finished one (so you at least see a
-  // result), and only fall back to a lobby if that is all there is, never blank when
-  // something watchable exists.
-  if (!opt) {
-    const live = [...sel.options].filter(o => o.value);
-    opt = live.find(o => o.textContent.includes("running"))
-       || live.find(o => o.textContent.includes("finished"))
-       || live[0];
+  await loadGameMeta();
+  if (wantMatch) {
+    autoFollow = false;                       // an explicit link pins the match
+    let game = "skirmish";
+    try {
+      const m = (await (await fetch(`${API}/v1/matches`)).json()).find(x => x.match_id === wantMatch);
+      if (m) game = m.game_id;
+    } catch (e) { /* fall back to skirmish */ }
+    connect(wantMatch, game);
+  } else {
+    followBtn.classList.add("on");
   }
-  if (opt) { sel.value = opt.value; connect(opt.value, opt.dataset.game); }
+  director();                                 // populate the dropdown and (if following) connect
 })();
 
 animate(); // RENDERERS initialized above; safe to start the render loop

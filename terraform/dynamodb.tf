@@ -17,5 +17,13 @@ resource "aws_dynamodb_table" "arena" {
     type = "S"
   }
 
+  # Match items carry a `ttl` epoch, refreshed on every write. Abandoned matches
+  # (no writes for ~7 days) are reaped automatically. Tokens/users have no ttl, so
+  # they never expire.
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
   tags = local.tags
 }

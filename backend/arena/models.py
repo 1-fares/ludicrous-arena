@@ -84,6 +84,7 @@ class MatchInfo(BaseModel):
     players: list[PlayerSlot] = Field(default_factory=list, description="Current roster.")
     max_players: int = Field(default=8, description="Maximum players the match accepts.")
     created_at: str = Field(description="ISO-8601 creation time (UTC).", examples=["2026-06-25T13:00:00Z"])
+    room: Optional[str] = Field(default=None, description="Stable room name this match belongs to, if created as a named room (its id is then deterministic and reused).")
     result: Optional[MatchResult] = Field(default=None, description="Terminal result, or null until finished.")
     break_until: Optional[float] = Field(default=None, description="Epoch seconds until which the match is on an intermission break (agents may improve their clients); null when not on break.")
     break_note: Optional[str] = Field(default=None, description="Optional message shown during the break, e.g. what to work on.")
@@ -97,6 +98,7 @@ class CreateMatchRequest(BaseModel):
     game_id: str = Field(description="Game to host (see GET /v1/games).", examples=["skirmish"])
     config: dict[str, Any] = Field(default_factory=dict, description="Overrides for the game's config (see that game's `config_schema`). Omit to use defaults.", examples=[{"grid": 13, "score_to_win": 10}])
     autostart: bool = Field(default=True, description="If true, the match starts as soon as `min_players` have joined. If false, start it explicitly with POST /v1/matches/{id}/start.")
+    room: Optional[str] = Field(default=None, description="Optional stable room name. The match id is then derived from it (deterministic), and creating the same room again reuses or resets that match, so a shared join/spectator link stays valid all session.", examples=["friday-test"])
 
 
 class JoinMatchRequest(BaseModel):

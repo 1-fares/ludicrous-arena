@@ -39,6 +39,9 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, allow_nan=False)
 
 
+_MATCH_TTL = 7 * 86400   # seconds; match items auto-expire if untouched this long
+
+
 class Conflict(Exception):
     """Raised when a conditional write loses the version check. The engine retries."""
 
@@ -189,7 +192,8 @@ class DynamoStore:
     def save_match_result(self, match_id: str, game_id: str, result: dict[str, Any]) -> None:
         self._table.put_item(Item={"pk": f"MATCH#{match_id}", "sk": "RESULT",
                                    "game_id": game_id, "result": _dumps(result),
-                                   "finished_at": int(time.time())})
+                                   "finished_at": int(time.time()),
+                                   "ttl": int(time.time()) + _MATCH_TTL})
 
     def _get(self, match_id: str, sk: str):
         item = self._table.get_item(Key={"pk": f"MATCH#{match_id}", "sk": sk}).get("Item")
@@ -199,7 +203,8 @@ class DynamoStore:
 
     def _put(self, match_id: str, sk: str, data: dict[str, Any], expected_version):
         new_ver = (expected_version or 0) + 1
-        item = {"pk": f"MATCH#{match_id}", "sk": sk, "data": _dumps(data), "version": new_ver}
+        item = {"pk": f"MATCH#{match_id}", "sk": sk, "data": _dumps(data), "version": new_ver,
+                "ttl": int(time.time()) + _MATCH_TTL}  # refreshed on every write; reaps abandoned matches
         try:
             if expected_version is None:
                 # First write of this (pk, sk) item. The condition is evaluated
@@ -235,7 +240,8 @@ class DynamoStore:
 
     def update_match_index(self, match_id: str, game_id: str, phase: str) -> None:
         self._table.put_item(Item={"pk": "INDEX#MATCHES", "sk": f"MATCH#{match_id}",
-                                   "game_id": game_id, "phase": phase})
+                                   "game_id": game_id, "phase": phase,
+                                   "ttl": int(time.time()) + _MATCH_TTL})
 
     def list_match_index(self) -> list[dict[str, Any]]:
         resp = self._table.query(

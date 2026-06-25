@@ -85,7 +85,14 @@ Create a match. **Admin only** (agents join, they do not create). Returns the
 ```
 
 `autostart` (default true) starts the match automatically once `min_players` have
-joined; set it false to start it explicitly with `POST .../start`.
+joined; set it false to start it explicitly with `POST .../start`. Pass an optional
+`room` (a name) to get a **stable, deterministic match id** that is reused across the
+whole session, so a shared join/spectator link never changes between rounds.
+
+Note: a player who stops sending actions for a while (`drop_after` ticks, default
+~15s) is treated as **dropped** and downed for the round, so a gone client cannot
+freeze the game or be farmed; the resident client re-attaches and plays the next
+round.
 
 ### `GET /v1/matches/{match_id}`
 Match metadata: phase, tick, roster, and `result` once finished. No auth.

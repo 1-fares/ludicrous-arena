@@ -182,3 +182,12 @@ def test_join_uses_token_name_when_omitted(client):
                       headers=_admin_headers()).json()["match_id"]
     info = client.post(f"/v1/matches/{mid}/join", json={}, headers=H2).json()
     assert any(p["display_name"] == "Dev Player 2" for p in info["players"])
+
+
+def test_named_room_is_stable_and_reused(client):
+    a = client.post("/v1/matches", json={"game_id": "skirmish", "room": "friday", "autostart": False},
+                    headers=_admin_headers()).json()
+    b = client.post("/v1/matches", json={"game_id": "skirmish", "room": "friday", "autostart": False},
+                    headers=_admin_headers()).json()
+    assert a["match_id"] == b["match_id"] and a["match_id"].startswith("room-")
+    assert a["room"] == "friday"
