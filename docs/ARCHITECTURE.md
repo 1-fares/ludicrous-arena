@@ -1,0 +1,145 @@
+# Architecture
+
+## One sentence
+
+The whole API is one Lambda (a FastAPI app behind Mangum) fronted by an API
+Gateway HTTP API; match state lives in DynamoDB and the simulation is advanced
+lazily, on demand, inside request handlers, so the service costs nothing when
+nobody is playing and a static three.js page polls a render endpoint to spectate.
+
+## Why this shape: cost
+
+The hard requirement is near-zero cost when idle. That rules out anything
+always-on. An ALB is a fixed ~$16/month and AWS states it does not scale to zero;
+a Fargate task bills for every running hour. Together they are ~$25-35/month even
+with no players. So the design is built entirely from services that bill per use
+and scale to zero:
+
+| Service | Idle cost | Role |
+|---|---|---|
+| API Gateway HTTP API | $0 | front door, proxies all paths to the Lambda |
+| Lambda | $0 | the FastAPI app; one invocation per request |
+| DynamoDB (on-demand) | $0 | tokens, users, match metadata, live match state |
+| S3 + CloudFront | ~$0 | static spectator viewer |
+
+Active cost is proportional to reads and actions: a Lambda invoke + a DynamoDB
+read (reads) or read+conditional-write (actions) per request, plus cheap HTTP API
+and DynamoDB request charges. Nobody playing means nothing running.
+
+## The cost of that: no server loop
+
+A continuously-ticking authoritative loop has no home here (Lambda is
+request/response, nothing is always on). So the simulation is **deterministic and
+evaluated on demand**:
+
+- Match state persists in DynamoDB with `last_tick` and the wall-clock time it was
+  materialized at.
+- On a **read** (agent observation or spectator scene) the handler loads the
+  state, fast-forwards the simulation in memory to *now* (`elapsed * tick_rate`
+  ticks), and returns the projection. It writes nothing.
+- On an **action** the handler loads the state, fast-forwards to now, applies the
+  action, and writes the result back under an optimistic version check.
+
+Because games are deterministic, "the world at time T" is a pure function of the
+last persisted state and elapsed time, so a read that computes it in memory and an
+action that persists it agree. Catch-up stops the moment `result` fires, so a
+match's time limit bounds the work even if it sat idle for an hour.
+
+The deathmatch reference game is "discrete tick-on-action" in exactly this sense:
+there is no loop, its world is resolved at read/action boundaries, and the viewer
+polls (with client-side mesh interpolation between polls) for smooth motion.
+
+## Components
+
+```
+   agents (external)                         spectators (browsers)
+        │  HTTP poll: state, actions               │  HTTP poll: scene
+        ▼                                           ▼
+ ┌─────────────────────────────────────────────────────────┐
+ │              API Gateway HTTP API  ($default)             │
+ └─────────────────────────────────────────────────────────┘
+        │  AWS_PROXY (every path)
+        ▼
+ ┌─────────────────────────────────────────────────────────┐
+ │   Lambda: arena.server:app via Mangum (FastAPI)           │
+ │                                                           │
+ │   Engine (stateless): load state, project to now,         │
+ │     apply action, conditional write back                  │
+ │   Registry: all game types (skirmish, deathmatch, lockdown, trading_desk)      │
+ │   Store: DynamoStore (tokens, users, match meta + state)  │
+ └─────────────────────────────────────────────────────────┘
+        │  get/put items, conditional writes
+        ▼
+   DynamoDB (single table)        S3 + CloudFront (static viewer)
+```
+
+Source map:
+
+| Concern | File |
+|---|---|
+| HTTP surface + Lambda handler | `backend/arena/server.py` |
+| On-demand simulation (project / apply / finalize) | `backend/arena/engine.py` |
+| Game extension point | `backend/arena/game.py` |
+| Wire schemas | `backend/arena/models.py` |
+| Persistence + optimistic concurrency | `backend/arena/store.py` |
+| Bearer-token auth | `backend/arena/auth.py` |
+| Bundled games | `backend/arena/games/*.py` |
+| Spectator viewer (polls scene) | `frontend/` |
+| AWS infra (API GW + Lambda + DynamoDB + S3/CloudFront) | `terraform/` |
+
+## DynamoDB single-table layout
+
+```
+pk                       sk                attributes
+TOKEN#<sha256(token)>    -                 user_id, label, revoked
+USER#<user_id>           -                 display_name
+MATCH#<match_id>         META              data(json: MatchInfo), version
+MATCH#<match_id>         STATE             data(json: StateRecord), version
+MATCH#<match_id>         RESULT            game_id, result, finished_at
+INDEX#MATCHES            MATCH#<match_id>   game_id, phase   (for listing)
+```
+
+META and STATE each carry a `version`; every write is conditional on it. There is
+no lock: two agents acting on the same match at the same instant both succeed
+because the loser of the version check reloads (now including the winner's effect),
+re-applies its own action, and writes again (`engine.submit_actions` retry loop).
+
+## State serialization
+
+Because state round-trips through DynamoDB JSON on every action, each game
+provides `encode_state` / `decode_state` (the only addition to the `Game`
+interface for the serverless model). Games keep ergonomic in-memory state
+(dataclasses, sets, tuples) and flatten it to JSON-safe dicts at the boundary.
+
+## Local development and tests
+
+The same FastAPI app runs locally under uvicorn with `ARENA_STORE=memory`
+(`MemoryStore` implements the identical versioning semantics in-process), so there
+is no need for DynamoDB or LocalStack to develop or test. Tests drive the engine
+with an injected clock, making wall-clock catch-up deterministic. The Lambda path
+differs only in the store and the Mangum entrypoint.
+
+## Tradeoffs (honest)
+
+- **Concurrency on a hot match**: serialized by the version check; contention is
+  bounded by the small player counts (<= 8). A pathological hot match retries.
+- **Twitch real-time**: high-frequency adversarial games are the weakest fit;
+  motion between polls is client-side interpolation, not server truth. Fine for
+  the cooperative / resource / scenario games this project targets; the deathmatch
+  is the one game pushed into the discrete-tick model.
+- **Per-action latency**: gains a DynamoDB read + conditional write versus the
+  in-memory loop a container would have.
+- **Read work**: a read re-simulates from the last persisted tick to now; bounded
+  by the match time limit, trivial in practice.
+- **Lambda cold start**: first request after idle pays a cold start (FastAPI +
+  pydantic import). Acceptable for this workload; provisioned concurrency is a
+  knob if it ever matters, but it reintroduces idle cost.
+
+## Backlog-worthy gaps
+
+- DynamoDB TTL on `MATCH#` items to garbage-collect finished matches and dead
+  lobbies (no eviction today).
+- Rate limiting per token at the API Gateway / Lambda edge.
+- Replays: append per-tick frames to S3 for playback.
+
+See [BACKLOG.md](../BACKLOG.md).

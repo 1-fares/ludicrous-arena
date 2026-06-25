@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ludicrous Arena: Architecture &amp; Status</title>
+<style>
+  :root{
+    --bg:#07090d; --panel:#0b0e14; --panel2:#10151f; --border:#1c2538;
+    --text:#cdd6e4; --muted:#6b7790; --blue:#7cc4ff; --green:#39d98a;
+    --amber:#ffd27c; --red:#ff7c7c; --violet:#c77cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+  a{color:var(--blue)}
+  header{padding:34px 28px 22px;border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg,#0c1320,transparent)}
+  header h1{margin:0 0 6px;font-size:26px;letter-spacing:.5px}
+  header h1 .b{color:var(--blue)}
+  header p{margin:0;color:var(--muted);max-width:74ch}
+  .wrap{max-width:1100px;margin:0 auto;padding:26px 22px 70px}
+  section{margin:34px 0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);
+    border-bottom:1px solid var(--border);padding-bottom:7px;margin:0 0 16px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+
+  .flow{display:flex;flex-direction:column;align-items:center;gap:0}
+  .tier{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+  .node{background:var(--panel2);border:1px solid var(--border);border-radius:9px;
+    padding:11px 15px;min-width:160px;text-align:center}
+  .node .t{font-weight:600}
+  .node .s{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .node.accent{border-color:#27496f;background:#0e1a28}
+  .badge0{display:inline-block;font-size:10.5px;color:var(--green);border:1px solid #1f5e44;
+    background:#0c1f17;border-radius:10px;padding:0 6px;margin-top:5px}
+  .arrow{color:var(--muted);font-size:20px;line-height:1;margin:7px 0}
+  .engine{background:#0e1a28;border:1px solid #27496f;border-radius:10px;padding:14px 16px;
+    width:min(680px,100%);text-align:left}
+  .engine .h{font-weight:600;color:var(--blue);margin-bottom:8px}
+  .engine ul{margin:0;padding-left:18px}
+  .engine li{margin:3px 0}
+  .engine .muted{color:var(--muted)}
+
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+
+  table{width:100%;border-collapse:collapse}
+  td,th{padding:7px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.6px}
+  tr:last-child td{border-bottom:none}
+  .ok{color:var(--green)} .zero{color:var(--green);font-weight:600}
+
+  .status li{list-style:none;padding:8px 0;border-bottom:1px solid var(--border);
+    display:flex;gap:10px;align-items:flex-start}
+  .status li:last-child{border-bottom:none}
+  .status ul{margin:0;padding:0}
+  .dot{flex:none;width:9px;height:9px;border-radius:50%;margin-top:7px}
+  .done .dot{background:var(--green)} .todo .dot{background:var(--amber)}
+  .status .x{display:block} .status .sub{color:var(--muted);font-size:13px;margin-top:1px}
+  .count{color:var(--muted);font-weight:400;font-size:13px}
+
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;
+    border:1px solid;letter-spacing:.4px;vertical-align:middle}
+  .pill.dn{color:var(--green);border-color:#1f5e44;background:#0c1f17}
+  .pill.pl{color:var(--amber);border-color:#5a4a22;background:#1d180c}
+  .legend{display:flex;gap:18px;color:var(--muted);font-size:13px;margin-bottom:14px;flex-wrap:wrap}
+  .legend span{display:inline-flex;gap:7px;align-items:center}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid var(--border);padding-top:14px}
+  .kv{color:var(--muted)}
+  .tag{font-size:11px;color:var(--violet);border:1px solid #3a2b52;border-radius:5px;padding:1px 6px;margin-left:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="b">LUDICROUS</span> ARENA <span class="kv" style="font-size:14px">/ architecture &amp; status</span></h1>
+  <p>An API-controlled multiplayer game server, plus a framework for adding games.
+     Agents drive characters and teams over an HTTP API with a secret token; a
+     three.js page polls a render endpoint to spectate. Built entirely from
+     scale-to-zero AWS services, so it costs about nothing when nobody is playing.</p>
+</header>
+
+<div class="wrap">
+
+  <section>
+    <h2>Request and data flow (serverless, scale to zero)</h2>
+    <div class="panel flow">
+      <div class="tier">
+        <div class="node"><div class="t">Agents</div><div class="s">poll state, post actions</div></div>
+        <div class="node"><div class="t">Spectators</div><div class="s">poll the scene endpoint</div></div>
+      </div>
+      <div class="arrow">&#8595;</div>
+      <div class="node accent" style="min-width:300px"><div class="t">API Gateway HTTP API</div>
+        <div class="s">proxies every path to the Lambda</div><span class="badge0">$0 idle</span></div>
+      <div class="arrow">&#8595;</div>
+      <div class="engine">
+        <div class="h">Lambda &nbsp;<span class="mono kv">arena.server:app via Mangum (FastAPI)</span> &nbsp;<span class="badge0">$0 idle</span></div>
+        <ul>
+          <li><b>Engine (stateless)</b> <span class="muted">: load state, fast-forward to now, apply, conditional write</span></li>
+          <li><b>Registry</b> <span class="muted">: all game types (skirmish, deathmatch, lockdown, trading_desk)</span></li>
+          <li><b>Store</b> <span class="muted">: tokens, users, match meta + serialized live state</span></li>
+        </ul>
+      </div>
+      <div class="arrow">&#8595;</div>
+      <div class="tier">
+        <div class="node"><div class="t">DynamoDB</div><div class="s">on-demand single table:<br>tokens, users, match state</div><span class="badge0">$0 idle</span></div>
+        <div class="node"><div class="t">S3 + CloudFront</div><div class="s">static three.js viewer</div><span class="badge0">~$0 idle</span></div>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:13.5px">
+      Nothing is always-on. There is no ALB and no container (an ALB alone is
+      ~$16/month and never scales to zero). Cost is proportional to actual reads
+      and actions; an idle arena bills essentially nothing.</p>
+  </section>
+
+  <section>
+    <h2>Execution model: the world is computed on demand</h2>
+    <div class="panel grid g2">
+      <div>
+        <p style="margin-top:0">There is no server loop. Match state sits in
+          DynamoDB with the tick and wall-clock time it was last materialized at.
+          The simulation is deterministic, so "the world now" is a pure function of
+          that state plus elapsed time.</p>
+        <ul style="margin:0;padding-left:18px">
+          <li><b>Read</b> (observation or scene): load state, fast-forward to now in
+            memory, return it. <b>No write.</b></li>
+          <li><b>Action</b>: load, fast-forward, apply, write back under an
+            optimistic version check (retry on conflict).</li>
+        </ul>
+      </div>
+      <div>
+        <p style="margin-top:0"><b>Why it holds together:</b></p>
+        <ul style="margin:0;padding-left:18px">
+          <li>Catch-up stops the instant <code>result</code> fires, so a match's
+            time limit bounds the work even after a long idle.</li>
+          <li>Concurrent agents serialize through the version check, no lock.</li>
+          <li>Deathmatch is "discrete tick-on-action": resolved at read/action
+            boundaries; the viewer interpolates between polls for smooth motion.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Idle cost</h2>
+    <div class="panel">
+      <table>
+        <tr><th>Service</th><th>Idle cost</th><th>Role</th></tr>
+        <tr><td>API Gateway HTTP API</td><td class="zero">$0</td><td>front door, proxies all paths to the Lambda</td></tr>
+        <tr><td>Lambda</td><td class="zero">$0</td><td>the FastAPI app; one invocation per request</td></tr>
+        <tr><td>DynamoDB (on-demand)</td><td class="zero">$0</td><td>tokens, users, match metadata + live state</td></tr>
+        <tr><td>S3 + CloudFront</td><td class="ok">~$0</td><td>static spectator viewer</td></tr>
+        <tr><td><i>(rejected) ALB + Fargate</i></td><td style="color:var(--red)">~$25-35/mo</td><td>always-on; cannot scale to zero, so not used</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Components</h2>
+    <div class="panel">
+      <table>
+        <tr><th>Concern</th><th>File</th></tr>
+        <tr><td>HTTP surface + Lambda handler (Mangum)</td><td class="mono">backend/arena/server.py</td></tr>
+        <tr><td>On-demand engine: project / apply / lazy-finalize</td><td class="mono">backend/arena/engine.py</td></tr>
+        <tr><td>Game extension point (9-method protocol)</td><td class="mono">backend/arena/game.py</td></tr>
+        <tr><td>Persistence + optimistic concurrency</td><td class="mono">backend/arena/store.py</td></tr>
+        <tr><td>Wire schemas</td><td class="mono">backend/arena/models.py</td></tr>
+        <tr><td>Bearer-token auth</td><td class="mono">backend/arena/auth.py</td></tr>
+        <tr><td>Bundled games</td><td class="mono">backend/arena/games/{skirmish,deathmatch,lockdown,finance}.py</td></tr>
+        <tr><td>Spectator viewer (polls the scene endpoint)</td><td class="mono">frontend/</td></tr>
+        <tr><td>AWS infra (API GW + Lambda + DynamoDB + S3/CF)</td><td class="mono">terraform/</td></tr>
+        <tr><td>Reference agent (stdlib, polls)</td><td class="mono">examples/python-agent/agent.py</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--green)"></span> implemented &amp; verified</span>
+      <span><span class="dot" style="background:var(--amber)"></span> not implemented (backlog)</span>
+    </div>
+    <div class="grid g2">
+      <div class="panel status done">
+        <p style="margin:0 0 6px"><b style="color:var(--green)">Implemented</b>
+          <span class="count">&nbsp;serverless v1, 37 tests green, post-audit</span></p>
+        <ul>
+          <li><span class="dot"></span><span><span class="x">On-demand engine</span><span class="sub">deterministic wall-clock catch-up; reads project, actions persist; lazy finalize</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Optimistic concurrency</span><span class="sub">versioned conditional writes serialize concurrent agents, no lock</span></span></li>
+          <li><span class="dot"></span><span><span class="x">State serialization</span><span class="sub">encode/decode round-trips every game's state through DynamoDB JSON</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Pluggable game framework</span><span class="sub">Game protocol + registry; four games sharing nothing but the interface</span></span></li>
+          <li><span class="dot"></span><span><span class="x">HTTP API + token auth</span><span class="sub">discovery, lobby, join/start, state poll, scene poll, action submit; hashed tokens</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Four games</span><span class="sub">skirmish (headline grid-maze shooter), deathmatch, lockdown (coop fog of war), trading_desk (industry scenario)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Review hardening</span><span class="sub">6-agent review applied: non-finite-input guards, rejected-feedback merge, no config leak, single meta-load on the hot path, viewer smoothing</span></span></li>
+          <li><span class="dot"></span><span><span class="x">three.js viewer</span><span class="sub">polls the scene endpoint, per-game renderers, scoreboard, result banner</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Serverless Terraform</span><span class="sub">API Gateway + Lambda + DynamoDB + S3/CloudFront; validates clean</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Reference agent + scripts</span><span class="sub">stdlib polling agent; run-local, test, package-lambda, deploy, issue-token</span></span></li>
+        </ul>
+      </div>
+      <div class="panel status todo">
+        <p style="margin:0 0 6px"><b style="color:var(--amber)">Not implemented</b>
+          <span class="count">&nbsp;none blocks local play or a deploy</span></p>
+        <ul>
+          <li><span class="dot"></span><span><span class="x">Rest of the scenario family</span><span class="sub">financial services is built; energy, ecommerce, government, logistics remain (plus a ScenarioGame base to extract)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Business sim</span><span class="sub">Ports of Call-style; would set <code>realtime=False</code> (one tick per action)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Match GC via DynamoDB TTL</span><span class="sub">finished matches and dead lobbies are not evicted yet</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Rate limiting</span><span class="sub">cap requests per token at the API Gateway / Lambda edge</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Replays + history</span><span class="sub">append per-tick frames to S3; history endpoint from RESULT records</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Custom domains + alerts</span><span class="sub">API Gateway domain + ACM; SNS billing/health alarms (placeholder var)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Cold-start mitigation</span><span class="sub">provisioned concurrency if first-request latency ever matters (adds idle cost)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Viewer camera controls</span><span class="sub">orbit/zoom; currently a slow auto-orbit</span></span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Game catalogue</h2>
+    <div class="grid g3">
+      <div class="panel" style="border-color:#27496f">
+        <p style="margin:0 0 4px"><b>Skirmish</b> <span class="pill dn">done</span> <span class="kv" style="font-size:11px">headline</span></p>
+        <p style="color:var(--muted);font-size:13px;margin:0">Grid-maze tactical shooter. Move a cell
+          at a time, turn in 90-degree steps, see only forward through a narrow cone (walls are cover).
+          Three hits and you are down. Each elimination scores a point, new ground a sliver, and camping exposes you; first to 10 wins the game.
+          Humanoid models, name labels, hearts, OrbitControls viewer.</p>
+      </div>
+      <div class="panel">
+        <p style="margin:0 0 4px"><b>Deathmatch</b> <span class="pill dn">done</span></p>
+        <p style="color:var(--muted);font-size:13px;margin:0">Adversarial free-for-all shooter,
+          2-8 players. Discrete tick-on-action under the on-demand engine. First to the score limit wins.</p>
+      </div>
+      <div class="panel">
+        <p style="margin:0 0 4px"><b>Lockdown</b> <span class="pill dn">done</span></p>
+        <p style="color:var(--muted);font-size:13px;margin:0">Cooperative escape room, 1-4 players.
+          Collect every fragment and reach the exit before the clock. Each agent sees only its
+          surroundings, so the team must communicate out of band.</p>
+      </div>
+      <div class="panel">
+        <p style="margin:0 0 4px"><b>Trading Desk</b> <span class="pill dn">done</span></p>
+        <p style="color:var(--muted);font-size:13px;margin:0 0 6px">First industry scenario
+          (financial services, mode <code>scenario</code>). Every agent trades the same deterministic
+          price path from the same cash; ranked by final equity. Turn-paced, the future is hidden.</p>
+        <div style="font-size:12.5px">rest of the family planned:
+          <span class="tag">energy</span><span class="tag">ecommerce</span>
+          <span class="tag">government</span><span class="tag">logistics</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>6-agent review &amp; hardening</h2>
+    <div class="panel">
+      <p style="margin-top:0">Three skeptic and three helper agents reviewed the whole
+        solution against the goals, scoped so none ran out of context (both lenses on the
+        riskiest part, the engine). Verdicts: all three skeptics <b>yes-with-fixes</b>, all
+        three helpers <b>yes-with-improvements</b>. The infra skeptic independently confirmed
+        the cost goal: <span class="zero">true idle cost ~$0/month</span>, no always-on
+        resources, deploys as written. Nobody challenged the serverless cost-first design.</p>
+    </div>
+    <div class="grid g2" style="margin-top:14px">
+      <div class="panel">
+        <p style="margin:0 0 6px"><b style="color:var(--green)">Fixed</b>
+          <span class="count">&nbsp;everything agreed</span></p>
+        <ul class="status done">
+          <li><span class="dot"></span><span><span class="x">Non-finite input could crash a tick</span><span class="sub"><code>fire angle:Infinity</code> reached math.cos(inf) -&gt; 500; now rejected at validate, and the store rejects NaN/inf so it can't become invalid JSON</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Rejected feedback clobbered across players</span><span class="sub">one agent's rejection list wiped another's; now merged</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Internal autostart leaked into public config</span><span class="sub">moved to a real MatchInfo field</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Engine quality</span><span class="sub">sub-tick drift, single meta-load on the hot path, dead param dropped, action cap, agent view returns result</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Viewer smoothing</span><span class="sub">no origin-snap, pooled+lerped projectiles, eased heading/scale, per-frame camera, tone-mapping + shadows, auto-refresh, error states</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Infra/docs cosmetics</span><span class="sub">pinned x86_64, trimmed IAM, stale comments and WebSocket docs removed, agent example + onboarding reconciled</span></span></li>
+        </ul>
+      </div>
+      <div class="panel">
+        <p style="margin:0 0 6px"><b style="color:var(--blue)">Built</b>
+          <span class="count">&nbsp;first industry scenario</span></p>
+        <p style="margin:0 0 8px"><b>trading_desk</b> (financial services). Turn-paced,
+          isolated-instance: every agent trades the same deterministic price path from the
+          same cash, future hidden, ranked by final equity. Verified live end to end.</p>
+        <p style="margin:0 0 6px"><b style="color:var(--amber)">Two judgment calls</b></p>
+        <ul style="margin:0;padding-left:18px;color:var(--muted);font-size:13px">
+          <li>STATE/META tick divergence is benign (projections reach the identical finished
+            tick), so a clarifying comment, not a risky write-on-read.</li>
+          <li>The <code>ScenarioGame</code> base is deferred until a second scenario exists,
+            to avoid abstracting from one example.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Key decisions</h2>
+    <div class="panel grid g2">
+      <div>
+        <p style="margin-top:0"><b>Serverless for cost, not for fashion.</b> The
+          requirement is near-zero idle. An ALB plus a Fargate task is ~$25-35/month
+          even with no players, so the design uses only services that bill per use
+          and scale to zero.</p>
+        <p><b>On-demand simulation, no loop.</b> Lambda is request/response, so the
+          world is advanced lazily inside request handlers. Deterministic games make
+          "the world now" a pure function of the last state and elapsed time.</p>
+      </div>
+      <div>
+        <p style="margin-top:0"><b>Optimistic concurrency, not a lock.</b> Two agents
+          acting at once both succeed: the loser of the version check reloads (now
+          including the winner's effect) and re-applies. Bounded by small rosters.</p>
+        <p><b>Same app everywhere.</b> The identical FastAPI app runs locally under
+          uvicorn against an in-memory store and in Lambda against DynamoDB; only the
+          store and entrypoint differ, so dev and tests need no AWS.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">
+    Generated from CLAUDE.md, docs/ARCHITECTURE.md, docs/GAMES.md, and BACKLOG.md.
+    Source of truth is the repository; this page is a snapshot. &nbsp;25 Jun 2026.
+  </div>
+
+</div>
+</body>
+</html>

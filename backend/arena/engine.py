@@ -1,0 +1,312 @@
+"""The simulation, evaluated on demand.
+
+There is no server loop and nothing lives in memory between requests. The
+authoritative state of a match sits in DynamoDB; the engine advances it lazily:
+
+- On a **read** (agent observation or spectator scene) the engine loads the
+  persisted state, fast-forwards the deterministic simulation to *now* in memory,
+  and returns the projection without writing anything.
+- On an **action** the engine loads the state, fast-forwards to now, applies the
+  action, and writes the result back under an optimistic version check (retrying
+  if a concurrent agent got there first).
+
+Because games are deterministic, "the world at time T" is a pure function of the
+last persisted state and the elapsed wall-clock time, so a read computing it in
+memory and an action persisting it agree. Catch-up stops as soon as ``result``
+fires, so an idle match cannot run away (its time limit bounds the work).
+
+Note on finished matches: once a match ends, META holds the terminal result and
+STATE is no longer advanced. Reads still recompute ``result`` from STATE, but
+``_advance`` always stops at the *first* tick the win condition holds, so every
+projection from the same STATE reaches the identical ``finished_tick`` -- META's
+stored result and any recomputation agree. STATE.last_tick lagging META is
+therefore harmless; STATE is the durable seed, not a second source of truth.
+
+This is what lets the whole service be Lambda + DynamoDB: zero cost when nobody is
+playing, cost proportional to actual reads and actions when they are.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Any, Callable, Optional
+
+from arena import registry
+from arena.config import validate_config
+from arena.game import Game
+from arena.models import MatchInfo, MatchPhase, MatchResult, PlayerSlot
+from arena.store import Conflict, StateRecord, Store
+
+_MAX_CATCHUP = 100_000  # safety valve: never fast-forward more ticks than this in one call
+_MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
+_RETRY = 6              # optimistic-write attempts before giving up
+
+
+class NotParticipant(Exception):
+    """The caller holds a valid token but is not a player in this match."""
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class Engine:
+    def __init__(self, store: Store, clock: Optional[Callable[[], float]] = None) -> None:
+        self._store = store
+        self._clock = clock or time.time  # injectable for deterministic tests
+
+    def _now_ms(self) -> int:
+        return int(self._clock() * 1000)
+
+    # -- meta loading ------------------------------------------------------
+
+    def _load_info(self, match_id: str) -> tuple[MatchInfo, int]:
+        """Load + validate match metadata, or raise KeyError. Single place that
+        turns a stored dict into a (MatchInfo, version) pair."""
+        meta = self._store.get_match_meta(match_id)
+        if meta is None:
+            raise KeyError(f"unknown match: {match_id}")
+        return MatchInfo.model_validate(meta[0]), meta[1]
+
+    def get_info(self, match_id: str) -> MatchInfo:
+        return self._load_info(match_id)[0]
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def create_match(self, game_id: str, config: dict[str, Any], autostart: bool) -> MatchInfo:
+        game = registry.get(game_id)
+        validate_config(game.meta, config)  # reject out-of-range config before it can hang/crash a start
+        match_id = uuid.uuid4().hex[:12]
+        info = MatchInfo(
+            match_id=match_id, game_id=game_id, phase=MatchPhase.lobby,
+            config=config, autostart=autostart, players=[],
+            max_players=game.meta.max_players, created_at=_now_iso(),
+        )
+        self._store.put_match_meta(match_id, info.model_dump(mode="json"), expected_version=None)
+        self._store.update_match_index(match_id, game_id, MatchPhase.lobby.value)
+        return info
+
+    def join_match(self, match_id: str, user_id: str, display_name: str,
+                   team: Optional[str]) -> MatchInfo:
+        for _ in range(_RETRY):
+            info, version = self._load_info(match_id)
+            game = registry.get(info.game_id)
+            # Idempotent: if you already hold a slot, resume it, even mid-match.
+            # This lets an agent whose process died re-attach to its seat instead
+            # of being locked out with a 409.
+            existing = next((p for p in info.players if p.user_id == user_id), None)
+            if existing:
+                return info
+            if info.phase != MatchPhase.lobby:
+                raise ValueError("match already started")
+            if len(info.players) >= game.meta.max_players:
+                raise ValueError("match full")
+            teams = game.meta.teams
+            assigned = team if team in teams else (
+                teams[len(info.players) % len(teams)] if teams else None)
+            # Keep display names unique within the match: per-name scoreboards
+            # (which some games key by name) would otherwise collide.
+            taken = {p.display_name for p in info.players}
+            name, n = display_name, 2
+            while name in taken:
+                name, n = f"{display_name} ({n})", n + 1
+            info.players.append(PlayerSlot(
+                player_id=f"p{len(info.players) + 1}", user_id=user_id,
+                display_name=name, team=assigned))
+            try:
+                self._store.put_match_meta(match_id, info.model_dump(mode="json"), version)
+            except Conflict:
+                continue  # someone else joined concurrently; reload and retry
+            if info.autostart and len(info.players) >= game.meta.min_players:
+                # Best-effort: the join already committed, so a start race must not
+                # surface as a join error. An explicit POST /start can recover.
+                try:
+                    self.start_match(match_id)
+                except (ValueError, Conflict):
+                    pass
+                return self.get_info(match_id)
+            return info
+        raise ValueError("join contention; retry")
+
+    def start_match(self, match_id: str) -> None:
+        info, version = self._load_info(match_id)
+        game = registry.get(info.game_id)
+        if info.phase != MatchPhase.lobby:
+            return
+        if len(info.players) < game.meta.min_players:
+            raise ValueError("not enough players")
+        state = game.init_state(info.config, info.players)
+        rec = StateRecord(state=game.encode_state(state), last_tick=0, last_wall_ms=self._now_ms())
+        try:
+            self._store.put_match_state(match_id, rec, expected_version=None)
+            info.phase = MatchPhase.running
+            self._store.put_match_meta(match_id, info.model_dump(mode="json"), version)
+            self._store.update_match_index(match_id, info.game_id, MatchPhase.running.value)
+        except Conflict:
+            return  # a concurrent start won the race; the match is already starting
+
+    # -- simulation core ---------------------------------------------------
+
+    def _target_tick(self, game: Game, rec: StateRecord) -> int:
+        """Tick the world should be at right now, given the wall clock."""
+        if not game.meta.realtime:
+            return rec.last_tick
+        elapsed_s = max(0, self._now_ms() - rec.last_wall_ms) / 1000.0
+        return rec.last_tick + int(elapsed_s * game.meta.tick_rate)
+
+    def _advance(self, game: Game, state: Any, from_tick: int, to_tick: int):
+        """Fast-forward ``state`` from ``from_tick`` to ``to_tick`` (or until the
+        game ends). Returns (tick_reached, result_or_None)."""
+        dt = 1.0 / game.meta.tick_rate
+        steps = min(max(0, to_tick - from_tick), _MAX_CATCHUP)
+        tick = from_tick
+        result = game.result(state)
+        for _ in range(steps):
+            if result is not None:
+                break
+            game.tick(state, dt)
+            tick += 1
+            result = game.result(state)
+        return tick, result
+
+    def _project(self, match_id: str):
+        """Read-only: load meta + state, fast-forward to now in memory. Returns
+        (game, info, version_meta, state, tick, result, rec, version). No write."""
+        info, mver = self._load_info(match_id)
+        game = registry.get(info.game_id)
+        loaded = self._store.get_match_state(match_id)
+        if loaded is None:
+            return game, info, None, 0, None, None, None
+        rec, version = loaded
+        state = game.decode_state(rec.state)
+        tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
+        return game, info, state, tick, result, rec, version
+
+    # -- reads -------------------------------------------------------------
+
+    def agent_view(self, match_id: str, user_id: str) -> dict[str, Any]:
+        """Calling agent's partial observation, projected to now. Resolves the
+        caller's player slot from the metadata it already loaded (one round trip)."""
+        game, info, state, tick, result, rec, _ = self._project(match_id)
+        slot = next((p for p in info.players if p.user_id == user_id), None)
+        if slot is None:
+            raise NotParticipant("not a participant in this match")
+        if state is None:
+            raise ValueError("match has not started")
+        self._lazy_finalize(match_id, result, tick)
+        return {
+            "match_id": match_id,
+            "tick": tick,
+            "phase": (MatchPhase.finished if result else info.phase).value,
+            "you": {
+                "player_id": slot.player_id,
+                "team": slot.team,
+                "rejected": (rec.rejected.get(slot.player_id, []) if rec else []),
+            },
+            "observation": game.observe(state, slot.player_id),
+            "result": (result.model_dump() if result else None),
+        }
+
+    def scene_view(self, match_id: str) -> dict[str, Any]:
+        """Full spectator render. Public (no auth); spectating is omniscient."""
+        game, info, state, tick, result, _, _ = self._project(match_id)
+        if state is None:
+            return {"match_id": match_id, "tick": 0, "phase": info.phase.value, "scene": None}
+        self._lazy_finalize(match_id, result, tick)
+        return {
+            "match_id": match_id,
+            "tick": tick,
+            "phase": (MatchPhase.finished if result else info.phase).value,
+            "scene": game.render(state),
+            "result": (result.model_dump() if result else None),
+        }
+
+    # -- actions -----------------------------------------------------------
+
+    def submit_actions(self, match_id: str, user_id: str, actions: list[dict[str, Any]]) -> int:
+        if len(actions) > _MAX_ACTIONS:
+            raise ValueError(f"too many actions in one submission (max {_MAX_ACTIONS})")
+        info, _ = self._load_info(match_id)
+        game = registry.get(info.game_id)
+        slot = next((p for p in info.players if p.user_id == user_id), None)
+        if slot is None:
+            raise NotParticipant("not a participant in this match")
+        player_id = slot.player_id
+        rate = game.meta.tick_rate
+
+        for _ in range(_RETRY):
+            loaded = self._store.get_match_state(match_id)
+            if loaded is None:
+                raise ValueError("match has not started")
+            rec, version = loaded
+            state = game.decode_state(rec.state)
+            tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
+            if result is not None:
+                self._lazy_finalize(match_id, result, tick)
+                raise ValueError("match finished")
+            rejected: list[str] = []
+            for action in actions:
+                err = game.validate(state, player_id, action)
+                if err is None:
+                    game.apply(state, player_id, action)
+                else:
+                    rejected.append(err)
+            # Turn-paced games advance exactly one tick per submission; realtime
+            # games let the wall clock advance them on the next read/action.
+            if not game.meta.realtime:
+                game.tick(state, 1.0 / rate)
+                tick += 1
+                new_wall = self._now_ms()
+            else:
+                # Carry the wall clock forward by exactly the ticks consumed, not
+                # to raw "now", so the dropped sub-tick remainder does not accrue
+                # as drift across many short submissions.
+                new_wall = rec.last_wall_ms + round((tick - rec.last_tick) * 1000.0 / rate)
+            result = game.result(state)
+            # Merge this player's rejections into the existing map so a concurrent
+            # player's feedback is not clobbered before they read it.
+            merged = {**rec.rejected, player_id: rejected}
+            new_rec = StateRecord(state=game.encode_state(state), last_tick=tick,
+                                  last_wall_ms=new_wall, rejected=merged)
+            try:
+                self._store.put_match_state(match_id, new_rec, version)
+            except Conflict:
+                continue  # a concurrent agent wrote first; reload and reapply
+            if result is not None:
+                self._lazy_finalize(match_id, result, tick)
+            return tick
+        raise ValueError("write contention; retry")
+
+    # -- helpers -----------------------------------------------------------
+
+    def _lazy_finalize(self, match_id: str, result: Optional[MatchResult], tick: int) -> None:
+        """Persist the terminal record the first time anyone observes the end.
+        Best-effort: a lost version race just means another caller finalized.
+        ``result`` is deterministic (first tick the win condition holds), so the
+        first writer records the canonical outcome."""
+        if result is None:
+            return
+        loaded = self._store.get_match_meta(match_id)
+        if loaded is None:
+            return
+        meta = MatchInfo.model_validate(loaded[0])
+        if meta.phase == MatchPhase.finished:
+            return
+        meta.phase = MatchPhase.finished
+        meta.tick = tick
+        meta.result = result
+        try:
+            self._store.put_match_meta(match_id, meta.model_dump(mode="json"), loaded[1])
+            self._store.update_match_index(match_id, meta.game_id, MatchPhase.finished.value)
+            self._store.save_match_result(match_id, meta.game_id, result.model_dump())
+        except Conflict:
+            pass
+
+    def list_matches(self) -> list[MatchInfo]:
+        out = []
+        for entry in self._store.list_match_index():
+            loaded = self._store.get_match_meta(entry["match_id"])
+            if loaded:
+                out.append(MatchInfo.model_validate(loaded[0]))
+        return out

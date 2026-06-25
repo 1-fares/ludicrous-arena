@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+aws_region     = "eu-central-1"
+project_prefix = "arena"
+
+# Built by scripts/package-lambda.sh (run it before the first apply).
+lambda_zip = "../backend/build/lambda.zip"
+
+# Tuning (optional):
+# lambda_memory  = 512
+# lambda_timeout = 15

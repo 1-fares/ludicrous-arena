@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ludicrous Arena: Spectator</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+           background: #07090d; color: #cdd6e4; overflow: hidden; }
+    #scene { position: fixed; inset: 0; }
+    #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; gap: 16px;
+           align-items: center; padding: 10px 14px; background: linear-gradient(#0b0e14ee, #0b0e1400);
+           pointer-events: none; }
+    #hud .brand { font-weight: 700; letter-spacing: .5px; color: #7cc4ff; }
+    #hud select, #hud button { pointer-events: auto; background: #121826; color: #cdd6e4;
+           border: 1px solid #243049; border-radius: 6px; padding: 5px 8px; font: inherit; }
+    #status { margin-left: auto; color: #6b7790; }
+    #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 180px;
+           background: #0b0e14cc; border: 1px solid #1c2538; border-radius: 8px; padding: 10px 12px; }
+    #scoreboard h3 { margin: 0 0 6px; font-size: 12px; color: #6b7790; text-transform: uppercase; letter-spacing: 1px; }
+    #scoreboard .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+    #scoreboard .row .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+    #health .row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; align-items: center; }
+    #health .hearts { letter-spacing: 1px; }
+    #health .name.dead { opacity: .45; text-decoration: line-through; }
+    #hint { position: fixed; left: 14px; bottom: 12px; color: #56607a;
+            font-size: 12px; background: #0b0e14aa; border: 1px solid #1c2538;
+            border-radius: 6px; padding: 5px 9px; pointer-events: none; }
+    #banner { position: fixed; inset: 0; display: none; place-items: center; pointer-events: none; }
+    #banner div { background: #0b0e14ee; border: 1px solid #2a3550; border-radius: 12px;
+           padding: 24px 40px; font-size: 20px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="hud">
+    <span class="brand">LUDICROUS ARENA</span>
+    <select id="matchSelect"><option value="">select a match…</option></select>
+    <button id="refresh">refresh</button>
+    <span id="status">idle</span>
+  </div>
+  <div id="scoreboard" hidden>
+    <h3>Scoreboard</h3><div id="scores"></div>
+    <div id="healthwrap" hidden><h3 style="margin-top:12px">Health</h3><div id="health"></div></div>
+  </div>
+  <div id="hint">drag to rotate · scroll to zoom · right-drag to pan</div>
+  <div id="banner"><div id="bannerText"></div></div>
+
+  <!-- three.js as an ES module from a pinned CDN; no build step, keeping the
+       frontend buildless. -->
+  <script type="importmap">
+  { "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module" src="./js/viewer.js?v=9"></script>
+</body>
+</html>
