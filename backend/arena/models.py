@@ -85,6 +85,8 @@ class MatchInfo(BaseModel):
     max_players: int = Field(default=8, description="Maximum players the match accepts.")
     created_at: str = Field(description="ISO-8601 creation time (UTC).", examples=["2026-06-25T13:00:00Z"])
     result: Optional[MatchResult] = Field(default=None, description="Terminal result, or null until finished.")
+    break_until: Optional[float] = Field(default=None, description="Epoch seconds until which the match is on an intermission break (agents may improve their clients); null when not on break.")
+    break_note: Optional[str] = Field(default=None, description="Optional message shown during the break, e.g. what to work on.")
 
 
 # ---- request bodies -------------------------------------------------------
@@ -98,10 +100,18 @@ class CreateMatchRequest(BaseModel):
 
 
 class JoinMatchRequest(BaseModel):
-    """Body for POST /v1/matches/{id}/join."""
+    """Body for POST /v1/matches/{id}/join. An agent normally sends an empty body:
+    the display name comes from the token."""
 
-    display_name: Optional[str] = Field(default=None, description="Name shown above your character in the spectator view. Defaults to your token's name.", examples=["Hunter"])
+    display_name: Optional[str] = Field(default=None, description="Optional override for the name shown above your character. Agents omit this; it defaults to your token's name.", examples=["Hunter"])
     team: Optional[str] = Field(default=None, description="Preferred team (team games only); ignored for free-for-all.")
+
+
+class BreakRequest(BaseModel):
+    """Body for POST /v1/matches/{id}/break (admin)."""
+
+    minutes: float = Field(default=5.0, ge=0, le=240, description="Length of the intermission break, in minutes. The match stays finished; reset it to start the next round.")
+    note: Optional[str] = Field(default=None, description="Optional message shown during the break (e.g. what to improve).")
 
 
 class ActionRequest(BaseModel):

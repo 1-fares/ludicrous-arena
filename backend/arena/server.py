@@ -12,9 +12,10 @@ keeps the service at zero cost when nobody is playing.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Path
+from fastapi import Depends, FastAPI, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from arena import auth, registry, store
@@ -22,6 +23,7 @@ from arena.engine import Engine, NotParticipant
 from arena.models import (
     ActionAck,
     ActionRequest,
+    BreakRequest,
     CreateMatchRequest,
     ErrorResponse,
     GameMeta,
@@ -162,23 +164,30 @@ def list_games() -> list[GameMeta]:
 
 @app.get("/v1/matches", response_model=list[MatchInfo], tags=["discovery"],
          summary="List matches")
-def list_matches() -> list[MatchInfo]:
+def list_matches(
+    phase: str | None = Query(default=None, description="Filter by phase; comma-separated (e.g. `lobby,running`)."),
+    game_id: str | None = Query(default=None, description="Filter by game id (e.g. `skirmish`)."),
+) -> list[MatchInfo]:
     """All known matches and their phase (`lobby` / `running` / `finished`). No
-    auth. Use this to find an open match to join, or to drive a spectator UI."""
-    return ENGINE.list_matches()
+    auth. An agent finds its match with `?phase=lobby,running&game_id=skirmish`; a
+    spectator UI lists everything. Match creation is admin-only, so agents join, not
+    create."""
+    phases = {p.strip() for p in phase.split(",")} if phase else None
+    return ENGINE.list_matches(phases=phases, game_id=game_id)
 
 
 # -- match lifecycle --------------------------------------------------------
 
 @app.post("/v1/matches", response_model=MatchInfo, tags=["match lifecycle"],
-          summary="Create a match",
-          responses={**E_AUTH, **E_NOTFOUND, 422: {"model": ErrorResponse, "description": "Config failed validation (wrong type or out of range)."}})
+          summary="Create a match (admin)",
+          responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, 422: {"model": ErrorResponse, "description": "Config failed validation (wrong type or out of range)."}})
 def create_match(req: CreateMatchRequest,
-                 identity: _Identity = Depends(auth.require_identity)) -> MatchInfo:
-    """Create a new match for a game. Returns the match (including its `match_id`).
-    With `autostart` true (default) it begins once `min_players` have joined;
-    otherwise start it yourself with `/start`. The `config` is validated against
-    the game's `config_schema`; out-of-range values are rejected with 422."""
+                 identity: _Identity = Depends(auth.require_admin)) -> MatchInfo:
+    """Create a new match for a game. **Admin only**: agents do not create matches,
+    they join one the admin provisioned (this is what keeps the arena from filling
+    with stray matches). With `autostart` true (default) it begins once
+    `min_players` have joined; otherwise start it with `/start`. `config` is
+    validated against the game's `config_schema`; out-of-range values give 422."""
     try:
         return ENGINE.create_match(req.game_id, req.config, req.autostart)
     except KeyError as e:
@@ -244,6 +253,37 @@ def reset_match(match_id: str = _MATCH_ID,
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/v1/matches/{match_id}/break", response_model=MatchInfo, tags=["match lifecycle"],
+          summary="Open an intermission break (admin)",
+          responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, **E_CONFLICT})
+def open_break(req: BreakRequest, match_id: str = _MATCH_ID,
+               identity: _Identity = Depends(auth.require_admin)) -> MatchInfo:
+    """Mark a finished match as on a timed **intermission break** so agents can lick
+    their wounds and improve their clients before the next round. Sets `break_until`
+    (and an optional `break_note`) on the match; the viewer shows a countdown and
+    agents keep polling. Start the next round with `/reset` when the break ends."""
+    until = time.time() + req.minutes * 60.0 if req.minutes > 0 else None
+    try:
+        return ENGINE.set_break(match_id, until, req.note)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.delete("/v1/matches/{match_id}", tags=["match lifecycle"],
+            summary="Delete a match (admin)", responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND})
+def delete_match(match_id: str = _MATCH_ID,
+                 identity: _Identity = Depends(auth.require_admin)) -> dict[str, Any]:
+    """Remove a match and all its state. **Admin only.** Use it to clear finished or
+    stray matches instead of editing the database by hand."""
+    try:
+        ENGINE.delete_match(match_id)
+        return {"deleted": match_id}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
 
 
 # -- play -------------------------------------------------------------------

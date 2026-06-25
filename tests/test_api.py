@@ -139,10 +139,46 @@ def test_reset_is_admin_only(client):
     client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
 
     assert client.post(f"/v1/matches/{mid}/reset").status_code == 401          # no token
-    assert client.post(f"/v1/matches/{mid}/reset", headers=H1).status_code == 403  # non-admin
+    assert client.post(f"/v1/matches/{mid}/reset", headers=H2).status_code == 403  # non-admin (H2 is a player)
     r = client.post(f"/v1/matches/{mid}/reset", headers=_admin_headers())      # admin
     assert r.status_code == 200 and r.json()["phase"] == "running"
 
 
 def test_reset_unknown_match_404(client):
     assert client.post("/v1/matches/nope/reset", headers=_admin_headers()).status_code == 404
+
+
+def test_create_match_is_admin_only(client):
+    # Agents join, they do not create. A non-admin player is rejected; admin allowed.
+    assert client.post("/v1/matches", json={"game_id": "skirmish"}, headers=H2).status_code == 403
+    assert client.post("/v1/matches", json={"game_id": "skirmish"}, headers=_admin_headers()).status_code == 200
+
+
+def test_delete_match_admin_only(client):
+    mid = client.post("/v1/matches", json={"game_id": "skirmish"}, headers=_admin_headers()).json()["match_id"]
+    assert client.delete(f"/v1/matches/{mid}", headers=H2).status_code == 403       # non-admin
+    assert client.delete(f"/v1/matches/{mid}", headers=_admin_headers()).status_code == 200
+    assert client.get(f"/v1/matches/{mid}").status_code == 404                       # gone
+
+
+def test_list_matches_phase_filter(client):
+    a = client.post("/v1/matches", json={"game_id": "skirmish", "autostart": False},
+                    headers=_admin_headers()).json()["match_id"]
+    assert a in {m["match_id"] for m in client.get("/v1/matches?phase=lobby").json()}
+    assert a not in {m["match_id"] for m in client.get("/v1/matches?phase=running").json()}
+
+
+def test_break_window_admin_only(client):
+    mid = client.post("/v1/matches", json={"game_id": "skirmish"}, headers=_admin_headers()).json()["match_id"]
+    r = client.post(f"/v1/matches/{mid}/break", json={"minutes": 5, "note": "improve"},
+                    headers=_admin_headers())
+    assert r.status_code == 200 and r.json()["break_until"] is not None and r.json()["break_note"] == "improve"
+    assert client.post(f"/v1/matches/{mid}/break", json={"minutes": 1}, headers=H2).status_code == 403
+
+
+def test_join_uses_token_name_when_omitted(client):
+    # An agent joins with no display_name; the name comes from its token (dev2 -> "Dev Player 2").
+    mid = client.post("/v1/matches", json={"game_id": "skirmish", "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    info = client.post(f"/v1/matches/{mid}/join", json={}, headers=H2).json()
+    assert any(p["display_name"] == "Dev Player 2" for p in info["players"])

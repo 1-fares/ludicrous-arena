@@ -23,13 +23,14 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 }
 
 data "aws_iam_policy_document" "lambda_dynamo" {
-  # Exactly the actions the store uses (GetItem, PutItem with conditions, Query
-  # for the match index). No UpdateItem/DeleteItem, no GSI, so neither is granted.
+  # The actions the store uses: GetItem, PutItem (conditional), Query for the match
+  # index, and DeleteItem for admin match cleanup (DELETE /v1/matches/{id}).
   statement {
     actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:Query",
+      "dynamodb:DeleteItem",
     ]
     resources = [aws_dynamodb_table.arena.arn]
   }

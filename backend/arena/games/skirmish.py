@@ -329,6 +329,24 @@ class Skirmish:
             fighters=fighters,
         )
 
+    def add_player(self, state: State, slot: PlayerSlot) -> None:
+        """Add a player to a running match at score 0 (frags/territory start fresh,
+        so a late joiner is not handicapped beyond being behind on the board).
+        Idempotent on player_id so a join retry cannot duplicate the fighter."""
+        if slot.player_id in state.fighters:
+            return
+        i = len(state.fighters)
+        sx, sy = state.spawns[i % len(state.spawns)]
+        occupied = {(f.x, f.y) for f in state.fighters.values()}
+        if (sx, sy) in occupied:                    # deterministic free cell if the spawn is taken
+            walls = self._wallset(state)
+            free = [(x, y) for x in range(state.grid) for y in range(state.grid)
+                    if (x, y) not in walls and (x, y) not in occupied]
+            if free:
+                sx, sy = free[(i * 7) % len(free)]
+        state.fighters[slot.player_id] = Fighter(name=slot.display_name, x=sx, y=sy,
+                                                 facing=i % 4, hearts=state.cfg["hearts"])
+
     # -- spatial helpers ---------------------------------------------------
 
     def _wallset(self, state: State) -> set[tuple[int, int]]:

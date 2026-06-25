@@ -288,7 +288,8 @@ function makeSkirmishRenderer() {
       prevBullets = d.bullets.map(b => ({ x: b.x, y: b.y }));
 
       const ranked = d.players.slice().sort((a, b) => b.score - a.score);
-      renderScores(ranked.map(p => ({ label: p.name, score: p.score, color: colorFor(d.players.indexOf(p)) })));
+      renderScores(ranked.map(p => ({ label: p.name, score: p.score, frags: p.frags,
+        exposed: p.exposed, color: colorFor(d.players.indexOf(p)) })), "score = frags + new ground");
       renderHealth(d.players.map((p, i) => ({ name: p.name, hearts: p.hearts,
         max: d.hearts_max, alive: p.alive, color: colorFor(i) })));
       statusExtra = `round ${d.round} · first to ${d.score_to_win}`;
@@ -508,10 +509,15 @@ function makeFinanceRenderer() {
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function renderScores(rows) {
+function renderScores(rows, legend) {
   scoreboard.hidden = false;
-  scoresEl.innerHTML = rows.map(r =>
-    `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}</span><b>${esc(r.score)}</b></div>`).join("");
+  const head = legend ? `<div class="legend">${esc(legend)}</div>` : "";
+  scoresEl.innerHTML = head + rows.map(r => {
+    const detail = r.frags != null
+      ? ` <span class="sub">${r.frags} frag${r.frags === 1 ? "" : "s"}${r.exposed ? " · <b class='exp'>EXPOSED</b>" : ""}</span>`
+      : "";
+    return `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}${detail}</span><b>${esc(r.score)}</b></div>`;
+  }).join("");
 }
 function renderHealth(rows) {
   if (!rows) { healthWrap.hidden = true; return; }
@@ -560,7 +566,8 @@ function connect(matchId, gameId) {
       if (frame.scene) r.update(frame.scene);
       else { statusEl.textContent = `${gameId} · ${frame.phase} · waiting for players…`; return; }
       statusEl.textContent = `${gameId} · tick ${frame.tick} · ${frame.phase}${statusExtra ? " · " + statusExtra : ""}`;
-      if (frame.phase === "finished" && !ended) {
+      const finished = frame.phase === "finished";
+      if (finished && !ended) {
         ended = true;
         const res = frame.result || {};
         // winners are match-local player_ids; map them to display names.
@@ -569,7 +576,11 @@ function connect(matchId, gameId) {
         const w = (res.winners || []).map(nameOf);
         bannerText.textContent = w.length ? `Winner: ${w.join(", ")} (${res.reason})` : `Match over (${res.reason})`;
         banner.style.display = "grid";
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        // Keep polling: if the match is reset (admin), the next frame flips back to
+        // running and we drop the banner and resume live, no reload needed.
+      } else if (!finished && ended) {
+        ended = false;
+        banner.style.display = "none";
       }
     } catch (e) { statusEl.textContent = "reconnecting…"; }
   }
@@ -622,11 +633,19 @@ setInterval(() => { if (!pollTimer) loadMatches(); }, 4000);
 const wantMatch = new URLSearchParams(location.search).get("match");
 (async function init() {
   await loadMatches();
-  if (wantMatch) {
-    const sel = document.getElementById("matchSelect");
-    const opt = [...sel.options].find(o => o.value === wantMatch);
-    if (opt) { sel.value = wantMatch; connect(wantMatch, opt.dataset.game); }
+  const sel = document.getElementById("matchSelect");
+  let opt = wantMatch ? [...sel.options].find(o => o.value === wantMatch) : null;
+  // No ?match= given: auto-connect so the bare domain "just works" for spectators.
+  // Prefer a running game, then the most recent finished one (so you at least see a
+  // result), and only fall back to a lobby if that is all there is, never blank when
+  // something watchable exists.
+  if (!opt) {
+    const live = [...sel.options].filter(o => o.value);
+    opt = live.find(o => o.textContent.includes("running"))
+       || live.find(o => o.textContent.includes("finished"))
+       || live[0];
   }
+  if (opt) { sel.value = opt.value; connect(opt.value, opt.dataset.game); }
 })();
 
 animate(); // RENDERERS initialized above; safe to start the render loop

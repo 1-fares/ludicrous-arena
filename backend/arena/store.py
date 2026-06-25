@@ -81,6 +81,9 @@ class Store(Protocol):
     def update_match_index(self, match_id: str, game_id: str, phase: str) -> None: ...
     def list_match_index(self) -> list[dict[str, Any]]: ...
 
+    # removal (admin cleanup)
+    def delete_match(self, match_id: str) -> None: ...
+
 
 class MemoryStore:
     """In-process store with the same versioning semantics as DynamoStore."""
@@ -147,6 +150,12 @@ class MemoryStore:
 
     def list_match_index(self) -> list[dict[str, Any]]:
         return list(self._index.values())
+
+    def delete_match(self, match_id: str) -> None:
+        self._meta.pop(match_id, None)
+        self._state.pop(match_id, None)
+        self._results.pop(match_id, None)
+        self._index.pop(match_id, None)
 
 
 class DynamoStore:
@@ -235,6 +244,12 @@ class DynamoStore:
         return [{"match_id": i["sk"].split("#", 1)[1], "game_id": i["game_id"], "phase": i["phase"]}
                 for i in resp.get("Items", [])]
 
+    def delete_match(self, match_id: str) -> None:
+        # Remove the three per-match items and the index pointer.
+        for sk in ("META", "STATE", "RESULT"):
+            self._table.delete_item(Key={"pk": f"MATCH#{match_id}", "sk": sk})
+        self._table.delete_item(Key={"pk": "INDEX#MATCHES", "sk": f"MATCH#{match_id}"})
+
 
 def from_env() -> Store:
     kind = os.environ.get("ARENA_STORE", "memory").lower()
@@ -244,8 +259,8 @@ def from_env() -> Store:
     # Seed dev identities so local multi-agent play works out of the box.
     base = os.environ.get("ARENA_DEV_TOKEN", "dev-token")  # plus dev-token-2..4 below
     store.put_user("dev", "Dev Player")
-    store.put_token(base, "dev", "local-dev")
+    store.put_token(base, "dev", "local-dev", admin=True)  # local operator is admin
     for i in range(2, 5):
         store.put_user(f"dev{i}", f"Dev Player {i}")
-        store.put_token(f"{base}-{i}", f"dev{i}", "local-dev")
+        store.put_token(f"{base}-{i}", f"dev{i}", "local-dev")  # players, non-admin
     return store

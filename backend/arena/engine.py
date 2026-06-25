@@ -98,8 +98,6 @@ class Engine:
             existing = next((p for p in info.players if p.user_id == user_id), None)
             if existing:
                 return info
-            if info.phase != MatchPhase.lobby:
-                raise ValueError("match already started")
             if len(info.players) >= game.meta.max_players:
                 raise ValueError("match full")
             teams = game.meta.teams
@@ -111,14 +109,29 @@ class Engine:
             name, n = display_name, 2
             while name in taken:
                 name, n = f"{display_name} ({n})", n + 1
-            info.players.append(PlayerSlot(
-                player_id=f"p{len(info.players) + 1}", user_id=user_id,
-                display_name=name, team=assigned))
+            slot = PlayerSlot(player_id=f"p{len(info.players) + 1}", user_id=user_id,
+                              display_name=name, team=assigned)
+            info.players.append(slot)
+            # Late join into a running match: inject the player into the live world
+            # at score 0 (the game decides how, via add_player). Roster grows; a join
+            # while finished just enters the roster and the next reset includes them.
+            if info.phase == MatchPhase.running and hasattr(game, "add_player"):
+                loaded = self._store.get_match_state(match_id)
+                if loaded is not None:
+                    rec, sver = loaded
+                    state = game.decode_state(rec.state)
+                    game.add_player(state, slot)  # idempotent on player_id
+                    try:
+                        self._store.put_match_state(match_id, StateRecord(
+                            state=game.encode_state(state), last_tick=rec.last_tick,
+                            last_wall_ms=rec.last_wall_ms, rejected=rec.rejected), sver)
+                    except Conflict:
+                        continue  # state advanced; reload roster + state and retry
             try:
                 self._store.put_match_meta(match_id, info.model_dump(mode="json"), version)
             except Conflict:
                 continue  # someone else joined concurrently; reload and retry
-            if info.autostart and len(info.players) >= game.meta.min_players:
+            if info.phase == MatchPhase.lobby and info.autostart and len(info.players) >= game.meta.min_players:
                 # Best-effort: the join already committed, so a start race must not
                 # surface as a join error. An explicit POST /start can recover.
                 try:
@@ -167,6 +180,8 @@ class Engine:
             info.phase = MatchPhase.running
             info.result = None
             info.tick = 0
+            info.break_until = None
+            info.break_note = None
             try:
                 self._store.put_match_state(match_id, rec, state_ver)
                 self._store.put_match_meta(match_id, info.model_dump(mode="json"), mver)
@@ -175,6 +190,27 @@ class Engine:
             self._store.update_match_index(match_id, info.game_id, MatchPhase.running.value)
             return self.get_info(match_id)
         raise ValueError("reset contention; retry")
+
+    def delete_match(self, match_id: str) -> None:
+        """Admin: remove a match entirely (meta, state, result, index). Raises
+        KeyError if it does not exist so the API can 404."""
+        self._load_info(match_id)  # raises KeyError on unknown match
+        self._store.delete_match(match_id)
+
+    def set_break(self, match_id: str, break_until: Optional[float], note: Optional[str]) -> MatchInfo:
+        """Admin: record an intermission window on a (finished) match so agents and
+        the viewer can show a countdown and a note. Does not change phase; the next
+        round begins with reset_match when the break ends."""
+        for _ in range(_RETRY):
+            info, version = self._load_info(match_id)
+            info.break_until = break_until
+            info.break_note = note
+            try:
+                self._store.put_match_meta(match_id, info.model_dump(mode="json"), version)
+            except Conflict:
+                continue
+            return self.get_info(match_id)
+        raise ValueError("break contention; retry")
 
     # -- simulation core ---------------------------------------------------
 
@@ -333,9 +369,16 @@ class Engine:
         except Conflict:
             pass
 
-    def list_matches(self) -> list[MatchInfo]:
+    def list_matches(self, phases: Optional[set[str]] = None,
+                     game_id: Optional[str] = None) -> list[MatchInfo]:
+        """All matches, optionally filtered. The cheap INDEX rows carry phase and
+        game_id, so filtering avoids loading the meta of matches we will drop."""
         out = []
         for entry in self._store.list_match_index():
+            if phases is not None and entry.get("phase") not in phases:
+                continue
+            if game_id is not None and entry.get("game_id") != game_id:
+                continue
             loaded = self._store.get_match_meta(entry["match_id"])
             if loaded:
                 out.append(MatchInfo.model_validate(loaded[0]))

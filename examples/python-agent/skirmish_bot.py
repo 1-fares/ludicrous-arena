@@ -9,14 +9,23 @@ last place it saw an enemy when it has a lead, and toward the nearest unexplored
 frontier otherwise. That keeps it moving across the whole arena and closing on
 targets. When an enemy lines up in its cone it stops and shoots.
 
+The client is **resident**: it joins, plays, and when the match finishes it keeps
+polling rather than exiting, so an admin reset (same match, scores wiped, round 1)
+just resumes, no restart, no re-join. It detects a reset by the tick regressing and
+rebuilds its map. It never creates a match (that is an admin action); given no
+`--match` it discovers the open one. The display name comes from your token; you do
+not pass a name.
+
 The brain is the `Brain` class (`act()` returns the actions for one tick). Read it
 as a worked example of the Skirmish API, then write your own.
 
 Usage:
-    python skirmish_bot.py --token <token> --name Hunter --match <match_id>
-    python skirmish_bot.py --api https://api.example.com --token <t> --name Vega --match <id>
+    python skirmish_bot.py --token <token>                       # prod, discover the match
+    python skirmish_bot.py --token <token> --match <match_id>    # prod, explicit match
+    python skirmish_bot.py --api http://localhost:8080 --token dev-token-2   # local dev
 
-The name you pass appears above your character in the spectator viewer.
+Stop it with Ctrl-C. Your name (shown above your character) is set when the token
+is minted; the agent is given only the token.
 """
 
 import argparse
@@ -40,11 +49,16 @@ class Client:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read() or "{}")
 
-    def join(self, mid, name):
-        return self._req("POST", f"/v1/matches/{mid}/join", {"display_name": name})
+    def join(self, mid):
+        # No name: the server uses the name bound to your token. Idempotent + rejoin-safe.
+        return self._req("POST", f"/v1/matches/{mid}/join", {})
 
     def match(self, mid):
         return self._req("GET", f"/v1/matches/{mid}")
+
+    def open_matches(self):
+        # The single skirmish match the admin provisioned (agents never create one).
+        return self._req("GET", "/v1/matches?phase=lobby,running&game_id=skirmish")
 
     def state(self, mid):
         return self._req("GET", f"/v1/matches/{mid}/state")
@@ -264,47 +278,91 @@ class Brain:
         return self._step_toward(x, y, f, target)
 
 
+def _discover(c):
+    """Find the single open skirmish match the admin provisioned, or None. Agents
+    never create matches; they join the one that exists."""
+    try:
+        ms = [m for m in c.open_matches() if m.get("phase") in ("lobby", "running")]
+    except Exception:
+        return None
+    if not ms:
+        return None
+    ms.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+    return ms[0]["match_id"]
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--api", default="http://localhost:8080")
-    ap.add_argument("--token", required=True)
-    ap.add_argument("--name", required=True)
-    ap.add_argument("--match", required=True)
-    ap.add_argument("--seconds", type=float, default=600.0, help="how long to play")
+    ap = argparse.ArgumentParser(description=(
+        "Resident Skirmish agent. Joins a match and plays, survives a finish AND an "
+        "admin reset (keeps polling, rejoins, plays from round 1), until you stop it "
+        "(Ctrl-C). The display name comes from your token; you do not pass one."))
+    ap.add_argument("--api", default="https://api.ludicrous-arena.com",
+                    help="API base (use http://localhost:8080 for local dev)")
+    ap.add_argument("--token", required=True, help="your bearer token (it carries your name)")
+    ap.add_argument("--match", default=None,
+                    help="match id; omit to discover the open skirmish match")
+    ap.add_argument("--once", action="store_true",
+                    help="exit when the match finishes instead of waiting for a reset")
     args = ap.parse_args()
 
     c = Client(args.api, args.token)
-    c.join(args.match, args.name)
-    print(f"{args.name}: joined {args.match}", flush=True)
+    mid = args.match
+    brain, last_tick, fails = None, -1, 0
+    POLL, IDLE = 0.12, 1.0
+    print(f"agent: serving {mid or '(discovering)'} at {args.api}", flush=True)
 
-    # Wait for the match to start.
-    while c.match(args.match)["phase"] == "lobby":
-        time.sleep(0.3)
-    print(f"{args.name}: playing", flush=True)
-
-    brain = Brain()
-    deadline = time.monotonic() + args.seconds
-    while time.monotonic() < deadline:
+    while True:
         try:
-            obs = c.state(args.match)
-        except urllib.error.HTTPError as e:
-            if e.code == 409:
-                time.sleep(0.2)
-                continue
-            raise
-        if obs["phase"] == "finished":
-            res = obs.get("result") or {}
-            print(f"{args.name}: game over ({res.get('reason')}); final scores {obs['observation']['scores']}", flush=True)
-            return
-        actions = brain.act(obs["observation"])
-        if actions:
+            if mid is None:                       # find the admin's match; never create one
+                mid = _discover(c)
+                if mid is None:
+                    time.sleep(IDLE); continue
+                print(f"agent: found match {mid}", flush=True)
+
+            phase = c.match(mid)["phase"]          # public, cheap, cold-start tolerant
+            if phase == "lobby":
+                c.join(mid)                        # claim/keep our seat; wait for kickoff
+                time.sleep(IDLE); continue
+            if phase == "finished":                # break/intermission, not the end
+                brain, last_tick = None, -1
+                if args.once:
+                    print("agent: finished (--once)", flush=True); return
+                time.sleep(IDLE); continue         # keep polling; resume when reset
+
+            # running
+            c.join(mid)                            # idempotent rejoin (re-attach after restart)
             try:
-                c.act(args.match, actions)
+                obs = c.state(mid)
             except urllib.error.HTTPError as e:
-                if e.code != 409:
-                    raise
-        time.sleep(0.12)
-    print(f"{args.name}: time up", flush=True)
+                if e.code == 403:                  # lost our seat somehow; re-claim
+                    c.join(mid); time.sleep(POLL); continue
+                if e.code == 409:                  # racing the start; retry
+                    time.sleep(POLL); continue
+                raise
+            if obs["phase"] == "finished":
+                brain, last_tick = None, -1; time.sleep(IDLE); continue
+            tick = obs.get("tick", 0)
+            if tick < last_tick:                   # tick regressed -> the world was reset
+                brain = None
+            last_tick = tick
+            if brain is None:
+                brain = Brain()                    # fresh map for this run
+            acts = brain.act(obs["observation"])
+            if acts:
+                try:
+                    c.act(mid, acts)
+                except urllib.error.HTTPError:
+                    pass                           # 409/transient; the next read recovers
+            fails = 0
+            time.sleep(POLL)
+        except KeyboardInterrupt:
+            print("agent: stopped", flush=True); return
+        except urllib.error.HTTPError as e:
+            if e.code == 404:                      # match gone (deleted/GC'd) -> rediscover
+                mid, brain, last_tick = None, None, -1
+            fails += 1; time.sleep(min(0.25 * 2 ** fails, 5.0))
+        except (urllib.error.URLError, OSError):   # cold start / timeout / transient
+            fails += 1; time.sleep(min(0.25 * 2 ** fails, 5.0))
 
 
 if __name__ == "__main__":

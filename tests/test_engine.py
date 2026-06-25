@@ -159,3 +159,21 @@ def test_reset_keeps_agents_playing_after_finish():
     assert eng.get_info(mid).phase.value == "running"
     now[0] += 0.2
     eng.submit_actions(mid, "u1", [{"type": "move", "dx": 1, "dy": 0}])  # plays again, no re-join
+
+
+def test_late_join_into_running_match_starts_at_zero():
+    # Flexibility: a player can join after the match has started; they appear at
+    # score 0 even if others are ahead, and play from the current round.
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 13, "score_to_win": 10}, autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "Echo", None)
+    eng.join_match(mid, "u2", "Fox", None)
+    eng.start_match(mid)
+    now[0] += 2.0
+    out = eng.join_match(mid, "u3", "Gus", None)          # mid-game join
+    assert out.phase.value == "running" and any(p.user_id == "u3" for p in out.players)
+    scene = eng.scene_view(mid)["scene"]
+    names = {p["name"]: p["score"] for p in scene["players"]}
+    assert len(scene["players"]) == 3
+    assert names.get("Gus") == 0.0                        # late joiner starts fresh
