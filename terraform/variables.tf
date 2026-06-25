@@ -1,11 +1,26 @@
 variable "aws_region" {
+  # eu-central-2 (Zurich): all compute and data live in Switzerland. The only
+  # us-east-1 resource is the CloudFront cert (a public cert, required there), via
+  # the aws.us_east_1 provider alias.
   type    = string
-  default = "eu-central-1"
+  default = "eu-central-2"
 }
 
 variable "project_prefix" {
   type    = string
   default = "arena"
+}
+
+variable "domain_name" {
+  description = "Apex domain. Empty leaves all custom-domain/ACM/Route53 wiring (Phase 2) off."
+  type        = string
+  default     = ""
+}
+
+variable "alert_email" {
+  description = "Email for the CloudWatch billing alarm. Empty disables the alarm."
+  type        = string
+  default     = ""
 }
 
 variable "lambda_zip" {

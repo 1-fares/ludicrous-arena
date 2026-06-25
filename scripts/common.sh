@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REGION="${AWS_REGION:-eu-central-1}"
+REGION="${AWS_REGION:-eu-central-2}"
 PROJECT_PREFIX="${ARENA_PREFIX:-arena}"
 
 # Read a Terraform output, or empty string if state is not initialised yet.

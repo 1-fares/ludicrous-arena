@@ -3,6 +3,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   default_root_object = "index.html"
   comment             = "${local.name} spectator viewer"
   price_class         = "PriceClass_100"
+  aliases             = local.has_domain ? [var.domain_name, local.www_domain] : []
 
   origin {
     domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
@@ -35,7 +36,10 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = local.has_domain ? null : true
+    acm_certificate_arn            = local.has_domain ? aws_acm_certificate_validation.cloudfront[0].certificate_arn : null
+    ssl_support_method             = local.has_domain ? "sni-only" : null
+    minimum_protocol_version       = local.has_domain ? "TLSv1.2_2021" : null
   }
 
   tags = local.tags
