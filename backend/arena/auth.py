@@ -44,3 +44,12 @@ def _resolve(token: Optional[str]) -> _Identity:
 def require_identity(creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer)) -> _Identity:
     """FastAPI dependency: resolve the bearer token to an identity, or raise 401."""
     return _resolve(creds.credentials if creds else None)
+
+
+def require_admin(identity: _Identity = Depends(require_identity)) -> _Identity:
+    """Like ``require_identity`` but rejects non-admin tokens with 403. Gates the
+    privileged operations (e.g. resetting a match) so client-side button visibility
+    is never the only thing standing between a stranger and the action."""
+    if not identity.is_admin:
+        raise HTTPException(status_code=403, detail="admin token required")
+    return identity

@@ -6,9 +6,10 @@ hash is stored, so the plaintext is shown exactly once, here.
     # Install boto3 first (it is not in the local dev venv):
     uv pip install boto3
 
-    # Point at the deployed table (its name is a Terraform output) and run:
+    # Point at the deployed table (its name is a Terraform output) and run.
+    # Use AWS_DEFAULT_REGION (boto3 honours it over a local ~/.aws/config default):
     ARENA_TABLE=$(terraform -chdir=terraform output -raw dynamodb_table) \
-    AWS_REGION=eu-central-1 \
+    AWS_DEFAULT_REGION=eu-central-2 \
         python scripts/issue-token.py --user alice --name "Alice"
 
     # Revoke later by deleting the TOKEN# item, or set revoked=true, in DynamoDB.
@@ -32,6 +33,8 @@ def main() -> None:
     ap.add_argument("--user", required=True, help="stable user id (e.g. github handle)")
     ap.add_argument("--name", help="display name (defaults to --user)")
     ap.add_argument("--label", default="cli", help="token label, for your own records")
+    ap.add_argument("--admin", action="store_true",
+                    help="grant admin rights (e.g. resetting any match)")
     ap.add_argument("--table", help="DynamoDB table (default: $ARENA_TABLE, then "
                                     "'arena'; the deployed name is "
                                     "`terraform output -raw dynamodb_table`)")
@@ -40,10 +43,12 @@ def main() -> None:
     store = DynamoStore(table_name=args.table)
     token = "arena_" + secrets.token_urlsafe(32)
     store.put_user(args.user, args.name or args.user)
-    store.put_token(token, args.user, args.label)
+    store.put_token(token, args.user, args.label, admin=args.admin)
 
     print(f"user:  {args.user}")
     print(f"token: {token}")
+    if args.admin:
+        print("admin: yes (can reset matches)")
     print("\nHand this token to the user. It is not recoverable -- only its hash is stored.")
 
 

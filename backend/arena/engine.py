@@ -146,6 +146,36 @@ class Engine:
         except Conflict:
             return  # a concurrent start won the race; the match is already starting
 
+    def reset_match(self, match_id: str) -> MatchInfo:
+        """Wipe a match's world back to a fresh start, keeping the same id and the
+        same roster. Scores, rounds, and positions reset; phase returns to running.
+        Agents still polling the same match just see round 1 and keep playing, no
+        re-join needed. Other matches are untouched. Admin-gated at the API.
+
+        Uses the optimistic version check like every other write: a fresh STATE is
+        written over the current one, so an agent's in-flight action loses its
+        version race, reloads, and continues from the reset world."""
+        for _ in range(_RETRY):
+            info, mver = self._load_info(match_id)
+            game = registry.get(info.game_id)
+            if len(info.players) < game.meta.min_players:
+                raise ValueError("not enough players to reset")
+            state = game.init_state(info.config, info.players)
+            rec = StateRecord(state=game.encode_state(state), last_tick=0, last_wall_ms=self._now_ms())
+            loaded = self._store.get_match_state(match_id)
+            state_ver = loaded[1] if loaded else None
+            info.phase = MatchPhase.running
+            info.result = None
+            info.tick = 0
+            try:
+                self._store.put_match_state(match_id, rec, state_ver)
+                self._store.put_match_meta(match_id, info.model_dump(mode="json"), mver)
+            except Conflict:
+                continue  # a concurrent action/start moved a version; reload and retry
+            self._store.update_match_index(match_id, info.game_id, MatchPhase.running.value)
+            return self.get_info(match_id)
+        raise ValueError("reset contention; retry")
+
     # -- simulation core ---------------------------------------------------
 
     def _target_tick(self, game: Game, rec: StateRecord) -> int:

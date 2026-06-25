@@ -9,7 +9,12 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-const API = new URLSearchParams(location.search).get("api") || "http://localhost:8080";
+// API base: explicit ?api= wins; otherwise localhost for local dev, and the
+// production API subdomain when served from anywhere else.
+const API = new URLSearchParams(location.search).get("api")
+  || (location.hostname === "localhost" || location.hostname === "127.0.0.1"
+        ? "http://localhost:8080"
+        : "https://api.ludicrous-arena.com");
 const POLL_HZ = 8;
 
 const PALETTE = [0x7cc4ff, 0xff7c7c, 0x9cff7c, 0xffd27c, 0xc77cff, 0x7cffe1, 0xff7cd2, 0xe1ff7c];
@@ -519,6 +524,7 @@ function renderHealth(rows) {
 
 // ---- match selection + polling -------------------------------------------
 let pollTimer = null, activeGame = null, statusExtra = "";
+let currentMatch = null, currentGame = null;   // what the viewer is connected to
 
 async function loadMatches() {
   const sel = document.getElementById("matchSelect");
@@ -536,6 +542,7 @@ function connect(matchId, gameId) {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   clearRoot();
   activeGame = gameId; statusExtra = "";
+  currentMatch = matchId || null; currentGame = gameId || null;
   banner.style.display = "none";
   if (!matchId) return;
   const r = RENDERERS[gameId];
@@ -576,6 +583,41 @@ document.getElementById("matchSelect").addEventListener("change", (e) => {
 });
 document.getElementById("refresh").addEventListener("click", loadMatches);
 setInterval(() => { if (!pollTimer) loadMatches(); }, 4000);
+
+// Admin reset: the button shows only when an admin token is stored in this browser.
+// Provide it once via the URL fragment (#admin=<token>); it is moved to localStorage
+// and stripped from the address bar. The server still enforces the token, so the
+// button being hidden is convenience, not the security boundary.
+(function setupAdmin() {
+  const ADMIN_KEY = "arena_admin_token";
+  const fromHash = new URLSearchParams(location.hash.slice(1)).get("admin");
+  if (fromHash) {
+    localStorage.setItem(ADMIN_KEY, fromHash);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  const token = localStorage.getItem(ADMIN_KEY);
+  const btn = document.getElementById("reset");
+  if (!token || !btn) return;
+  btn.hidden = false;
+  btn.addEventListener("click", async () => {
+    if (!currentMatch) { statusEl.textContent = "select a match first"; return; }
+    btn.disabled = true;
+    try {
+      const resp = await fetch(`${API}/v1/matches/${currentMatch}/reset`,
+        { method: "POST", headers: { Authorization: "Bearer " + token } });
+      if (resp.ok) {
+        connect(currentMatch, currentGame);   // resume polling from the fresh world
+        statusEl.textContent = "match reset";
+      } else if (resp.status === 401 || resp.status === 403) {
+        statusEl.textContent = "admin token rejected";
+        localStorage.removeItem(ADMIN_KEY); btn.hidden = true;
+      } else {
+        statusEl.textContent = `reset failed (${resp.status})`;
+      }
+    } catch (e) { statusEl.textContent = "reset failed"; }
+    btn.disabled = false;
+  });
+})();
 
 const wantMatch = new URLSearchParams(location.search).get("match");
 (async function init() {

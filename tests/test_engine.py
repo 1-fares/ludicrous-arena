@@ -124,3 +124,38 @@ def test_optimistic_write_handles_two_agents_same_tick():
     scene = eng.scene_view(mid)
     assert scene["phase"] == "running"
     assert len(scene["scene"]["players"]) == 2
+
+
+def test_reset_match_wipes_world_keeps_roster():
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11, "score_to_win": 10}, autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "Echo", None)
+    eng.join_match(mid, "u2", "Fox", None)
+    eng.start_match(mid)
+    now[0] += 5.0                       # let the world tick on
+    before = eng.scene_view(mid)
+    assert before["tick"] > 0 and before["phase"] == "running"
+    roster = [p.player_id for p in eng.get_info(mid).players]
+
+    out = eng.reset_match(mid)
+    assert out.phase.value == "running"
+    assert [p.player_id for p in out.players] == roster   # same roster, same ids
+    after = eng.scene_view(mid)
+    assert after["tick"] == 0                             # world wiped to a fresh start
+    assert after["scene"]["round"] == 1
+    assert all(p["score"] == 0 for p in after["scene"]["players"])
+
+
+def test_reset_keeps_agents_playing_after_finish():
+    # A finished match can be reset back to running; an agent that kept its token
+    # can submit again with no re-join.
+    eng, now = _engine()
+    mid = _start_deathmatch(eng)        # score_limit 1: ends on the first kill
+    now[0] += 600.0
+    eng.scene_view(mid)                 # observe -> lazy-finalize to finished
+    assert eng.get_info(mid).phase.value == "finished"
+    eng.reset_match(mid)
+    assert eng.get_info(mid).phase.value == "running"
+    now[0] += 0.2
+    eng.submit_actions(mid, "u1", [{"type": "move", "dx": 1, "dy": 0}])  # plays again, no re-join

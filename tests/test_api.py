@@ -122,3 +122,27 @@ def test_turn_paced_advances_one_tick_per_action(client):
     a = client.get(f"/v1/matches/{mid}/state", headers=H1).json()["tick"]
     b = client.get(f"/v1/matches/{mid}/state", headers=H1).json()["tick"]
     assert a == b  # no wall time passed between the two reads
+
+
+def _admin_headers():
+    server.ENGINE._store.put_user("admin", "Admin")
+    server.ENGINE._store.put_token("admin-token", "admin", "test", admin=True)
+    return {"Authorization": "Bearer admin-token"}
+
+
+def test_reset_is_admin_only(client):
+    mid = client.post("/v1/matches",
+                      json={"game_id": "skirmish", "config": {"grid": 11}, "autostart": False},
+                      headers=H1).json()["match_id"]
+    client.post(f"/v1/matches/{mid}/join", json={"display_name": "Echo"}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={"display_name": "Fox"}, headers=H2)
+    client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
+
+    assert client.post(f"/v1/matches/{mid}/reset").status_code == 401          # no token
+    assert client.post(f"/v1/matches/{mid}/reset", headers=H1).status_code == 403  # non-admin
+    r = client.post(f"/v1/matches/{mid}/reset", headers=_admin_headers())      # admin
+    assert r.status_code == 200 and r.json()["phase"] == "running"
+
+
+def test_reset_unknown_match_404(client):
+    assert client.post("/v1/matches/nope/reset", headers=_admin_headers()).status_code == 404

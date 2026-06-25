@@ -55,17 +55,18 @@ class StateRecord:
 
 
 class _Identity:
-    __slots__ = ("user_id", "display_name")
+    __slots__ = ("user_id", "display_name", "is_admin")
 
-    def __init__(self, user_id: str, display_name: str):
+    def __init__(self, user_id: str, display_name: str, is_admin: bool = False):
         self.user_id = user_id
         self.display_name = display_name
+        self.is_admin = is_admin
 
 
 class Store(Protocol):
     def resolve_token(self, token: str) -> Optional[_Identity]: ...
     def put_user(self, user_id: str, display_name: str) -> None: ...
-    def put_token(self, token: str, user_id: str, label: str) -> None: ...
+    def put_token(self, token: str, user_id: str, label: str, admin: bool = False) -> None: ...
     def save_match_result(self, match_id: str, game_id: str, result: dict[str, Any]) -> None: ...
 
     # match metadata (roster, phase, config, result)
@@ -97,13 +98,13 @@ class MemoryStore:
         if not rec or rec.get("revoked"):
             return None
         uid = rec["user_id"]
-        return _Identity(uid, self._users.get(uid, uid))
+        return _Identity(uid, self._users.get(uid, uid), bool(rec.get("admin")))
 
     def put_user(self, user_id: str, display_name: str) -> None:
         self._users[user_id] = display_name
 
-    def put_token(self, token: str, user_id: str, label: str) -> None:
-        self._tokens[hash_token(token)] = {"user_id": user_id, "label": label,
+    def put_token(self, token: str, user_id: str, label: str, admin: bool = False) -> None:
+        self._tokens[hash_token(token)] = {"user_id": user_id, "label": label, "admin": admin,
                                            "revoked": False, "created_at": int(time.time())}
 
     def save_match_result(self, match_id: str, game_id: str, result: dict[str, Any]) -> None:
@@ -165,16 +166,16 @@ class DynamoStore:
             return None
         uid = item["user_id"]
         u = self._table.get_item(Key={"pk": f"USER#{uid}", "sk": "-"}).get("Item") or {}
-        return _Identity(uid, u.get("display_name", uid))
+        return _Identity(uid, u.get("display_name", uid), bool(item.get("admin")))
 
     def put_user(self, user_id: str, display_name: str) -> None:
         self._table.put_item(Item={"pk": f"USER#{user_id}", "sk": "-",
                                    "display_name": display_name, "created_at": int(time.time())})
 
-    def put_token(self, token: str, user_id: str, label: str) -> None:
+    def put_token(self, token: str, user_id: str, label: str, admin: bool = False) -> None:
         self._table.put_item(Item={"pk": f"TOKEN#{hash_token(token)}", "sk": "-",
-                                   "user_id": user_id, "label": label, "revoked": False,
-                                   "created_at": int(time.time())})
+                                   "user_id": user_id, "label": label, "admin": admin,
+                                   "revoked": False, "created_at": int(time.time())})
 
     def save_match_result(self, match_id: str, game_id: str, result: dict[str, Any]) -> None:
         self._table.put_item(Item={"pk": f"MATCH#{match_id}", "sk": "RESULT",

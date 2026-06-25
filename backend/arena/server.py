@@ -229,6 +229,23 @@ def start_match(match_id: str = _MATCH_ID,
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/v1/matches/{match_id}/reset", response_model=MatchInfo, tags=["match lifecycle"],
+          summary="Reset a match (admin)",
+          responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, **E_CONFLICT})
+def reset_match(match_id: str = _MATCH_ID,
+                identity: _Identity = Depends(auth.require_admin)) -> MatchInfo:
+    """Wipe a match's world back to a fresh start, keeping the same id and roster.
+    Scores, rounds, and positions reset and play resumes from the start; agents
+    still polling the match keep going with no re-join. Requires an **admin** token;
+    other matches are unaffected."""
+    try:
+        return ENGINE.reset_match(match_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 # -- play -------------------------------------------------------------------
 
 @app.get("/v1/matches/{match_id}/state", response_model=StateResponse, tags=["play"],

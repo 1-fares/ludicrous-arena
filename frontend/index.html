@@ -16,6 +16,8 @@
     #hud .brand { font-weight: 700; letter-spacing: .5px; color: #7cc4ff; }
     #hud select, #hud button { pointer-events: auto; background: #121826; color: #cdd6e4;
            border: 1px solid #243049; border-radius: 6px; padding: 5px 8px; font: inherit; }
+    #reset { background: #2a1418; color: #ff9a9a; border-color: #5a2730; }
+    #reset:hover { background: #3a1a20; }
     #status { margin-left: auto; color: #6b7790; }
     #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 180px;
            background: #0b0e14cc; border: 1px solid #1c2538; border-radius: 8px; padding: 10px 12px; }
@@ -39,6 +41,7 @@
     <span class="brand">LUDICROUS ARENA</span>
     <select id="matchSelect"><option value="">select a match…</option></select>
     <button id="refresh">refresh</button>
+    <button id="reset" hidden>reset match</button>
     <span id="status">idle</span>
   </div>
   <div id="scoreboard" hidden>
@@ -56,6 +59,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=9"></script>
+  <script type="module" src="./js/viewer.js?v=10"></script>
 </body>
 </html>
