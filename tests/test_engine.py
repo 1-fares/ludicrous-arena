@@ -193,3 +193,18 @@ def test_dropped_player_is_pruned_from_roster():
         eng.submit_actions(mid, "u1", [{"type": "wait"}])
     roster = {p.user_id for p in eng.get_info(mid).players}
     assert "u1" in roster and "u2" not in roster
+
+
+def test_lobby_shows_board_and_players_before_start():
+    import pytest
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11}, autostart=False)
+    mid = info.match_id
+    scene = eng.scene_view(mid)                          # board exists at create, no players
+    assert scene["scene"]["walls"] and scene["scene"]["players"] == []
+    eng.join_match(mid, "u1", "Echo", None)             # player appears on the board in lobby
+    assert [p["name"] for p in eng.scene_view(mid)["scene"]["players"]] == ["Echo"]
+    with pytest.raises(ValueError):                      # agents cannot read before start
+        eng.agent_view(mid, "u1")
+    t0 = eng.scene_view(mid)["tick"]; now[0] += 5.0      # lobby does not tick
+    assert eng.scene_view(mid)["tick"] == t0

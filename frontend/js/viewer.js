@@ -559,6 +559,23 @@ function setBanner(html) {
   else { banner.style.display = "none"; }
 }
 
+// A placeholder skirmish board for the lobby, so the arena is up and circling and
+// players visibly gather in it as they join (real positions appear once it starts).
+function lobbyScene(info) {
+  const g = 13, walls = [];
+  for (let i = 0; i < g; i++) walls.push([i, 0], [i, g - 1], [0, i], [g - 1, i]);
+  const n = Math.max(1, info.players.length);
+  const players = info.players.map((p, i) => {
+    const a = (i / n) * Math.PI * 2;
+    return {
+      id: p.player_id, name: p.display_name,
+      x: Math.round(g / 2 + Math.cos(a) * 3), y: Math.round(g / 2 + Math.sin(a) * 3),
+      dx: 0, dy: 1, hearts: 3, alive: true, exposed: false, score: 0, frags: 0,
+    };
+  });
+  return { grid: g, walls, round: 0, phase: "lobby", score_to_win: 0, hearts_max: 3, players, bullets: [] };
+}
+
 function connect(matchId, gameId) {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   clearRoot();
@@ -593,14 +610,16 @@ function connect(matchId, gameId) {
         for (const [id, nm] of rosterMap) if (!cur.has(id)) toast(`${nm} dropped`, true);
         rosterMap = cur;
       }
-      // Lobby, or not yet started: a legible roster card, never a blank board.
+      // Lobby, or not yet started: show the arena spinning with players gathering
+      // (the real board + characters once the server has it), the count in the
+      // status. Never a blank board.
       if (info.phase === "lobby" || !frame.scene) {
         const min = gameMeta[gameId]?.min ?? 2;
-        const names = info.players.map(p => esc(p.display_name)).join(", ") || "-";
         const need = info.players.length >= min ? "ready to start" : `waiting for ${min - info.players.length} more`;
-        setBanner(`<b>${esc(titleFor(gameId))}</b><div class="bsub">Lobby · ${info.players.length}/${info.max_players} joined · ${need}</div><div class="bsub">${names}</div>`);
-        statusEl.textContent = `${gameId} · lobby · ${info.players.length}/${info.max_players}`;
-        scoreboard.hidden = true;
+        if (frame.scene) { r.update(frame.scene); setBanner(null); }              // real maze + players
+        else if (gameId === "skirmish" && info.players.length) { r.update(lobbyScene(info)); setBanner(null); }
+        else { setBanner(`<b>${esc(titleFor(gameId))}</b><div class="bsub">${info.players.length}/${info.max_players} joined · ${need}</div>`); scoreboard.hidden = true; }
+        statusEl.textContent = `${titleFor(gameId)} · Lobby · ${info.players.length}/${info.max_players} joined · ${need}`;
         return;
       }
       if (frame.scene) r.update(frame.scene);

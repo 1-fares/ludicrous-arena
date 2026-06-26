@@ -97,6 +97,13 @@ class Engine:
         )
         self._store.put_match_meta(match_id, info.model_dump(mode="json"), expected_version=None)
         self._store.update_match_index(match_id, game_id, MatchPhase.lobby.value)
+        # Games that support add_player get their board built now (no players yet), so
+        # the real maze and joined characters are visible in the lobby before start.
+        if hasattr(game, "add_player"):
+            state = game.init_state(config, [])
+            self._store.put_match_state(match_id, StateRecord(
+                state=game.encode_state(state), last_tick=0, last_wall_ms=self._now_ms()),
+                expected_version=None)
         return info
 
     def join_match(self, match_id: str, user_id: str, display_name: str,
@@ -124,10 +131,11 @@ class Engine:
             slot = PlayerSlot(player_id=f"p{len(info.players) + 1}", user_id=user_id,
                               display_name=name, team=assigned)
             info.players.append(slot)
-            # Late join into a running match: inject the player into the live world
-            # at score 0 (the game decides how, via add_player). Roster grows; a join
-            # while finished just enters the roster and the next reset includes them.
-            if info.phase == MatchPhase.running and hasattr(game, "add_player"):
+            # Put the player on the board at score 0 (the game decides how, via
+            # add_player), whether the match is in the lobby (so they appear in the
+            # waiting arena) or already running (a late join). A join while finished
+            # just enters the roster and the next reset includes them.
+            if info.phase in (MatchPhase.lobby, MatchPhase.running) and hasattr(game, "add_player"):
                 loaded = self._store.get_match_state(match_id)
                 if loaded is not None:
                     rec, sver = loaded
@@ -161,10 +169,19 @@ class Engine:
             return
         if len(info.players) < game.meta.min_players:
             raise ValueError("not enough players")
-        state = game.init_state(info.config, info.players)
-        rec = StateRecord(state=game.encode_state(state), last_tick=0, last_wall_ms=self._now_ms())
+        loaded = self._store.get_match_state(match_id)
+        if loaded is None:
+            # No pre-built board (games without add_player): build it now with the roster.
+            state = game.init_state(info.config, info.players)
+            rec = StateRecord(state=game.encode_state(state), last_tick=0, last_wall_ms=self._now_ms())
+            sver = None
+        else:
+            # The lobby board already holds the maze and the joined players: just
+            # start the clock, do not rebuild (that would reshuffle the maze/spawns).
+            rec0, sver = loaded
+            rec = StateRecord(state=rec0.state, last_tick=0, last_wall_ms=self._now_ms())
         try:
-            self._store.put_match_state(match_id, rec, expected_version=None)
+            self._store.put_match_state(match_id, rec, sver)
             info.phase = MatchPhase.running
             self._store.put_match_meta(match_id, info.model_dump(mode="json"), version)
             self._store.update_match_index(match_id, info.game_id, MatchPhase.running.value)
@@ -258,6 +275,9 @@ class Engine:
             return game, info, None, 0, None, None, None
         rec, version = loaded
         state = game.decode_state(rec.state)
+        if info.phase == MatchPhase.lobby:
+            # The lobby board is a static preview; the simulation has not begun.
+            return game, info, state, rec.last_tick, None, rec, version
         tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
         return game, info, state, tick, result, rec, version
 
@@ -270,7 +290,7 @@ class Engine:
         slot = next((p for p in info.players if p.user_id == user_id), None)
         if slot is None:
             raise NotParticipant("not a participant in this match")
-        if state is None:
+        if state is None or info.phase == MatchPhase.lobby:
             raise ValueError("match has not started")
         self._lazy_finalize(match_id, result, tick)
         return {
@@ -310,6 +330,8 @@ class Engine:
         slot = next((p for p in info.players if p.user_id == user_id), None)
         if slot is None:
             raise NotParticipant("not a participant in this match")
+        if info.phase == MatchPhase.lobby:
+            raise ValueError("match has not started")
         player_id = slot.player_id
         rate = game.meta.tick_rate
 
