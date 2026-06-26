@@ -56,6 +56,7 @@ cooldowns gate how often you move or fire (one shot per second).
             "score": 1.35, "frags": 1, "territory": 0.35, "exposed": false,
             "camp_ticks": 4, "expose_at": 30,
             "last_hit": {"tick": 39, "dir": "W", "from": "behind"},
+            "ground": {"state": "cracking", "decay": 1, "falls_in": 18},
             "out": false, "out_reason": null, "fell_tick": null, "round_wins": 3},
     "view": {
       "cells": [

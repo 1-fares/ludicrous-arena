@@ -441,7 +441,7 @@ def test_outer_ring_falls_on_schedule_and_puts_fighter_out_for_the_round():
     p1.frags = 7
     you = g.observe(st, "p1")["you"]
     assert you["out"] is True and you["score"] == 0
-    assert you["out_reason"] == "fell into the void this round"
+    assert "fell into the void" in you["out_reason"]
     assert g.observe(st, "p1")["scores"][p1.name] == 0
 
 
@@ -639,3 +639,27 @@ def test_decode_state_fills_new_config_defaults():
     g.result(st)
     g.observe(st, "p1")
     g.render(st)
+
+
+def test_you_ground_reports_standing_tile_decay():
+    """An agent must see the state of the tile under it, not only forward cells.
+
+    The vision cone starts ahead, so without you.ground an agent gets no signal
+    that the ground beneath it is cracking until it is too late to step off.
+    """
+    g = _game()
+    # Fast collapse so an outer tile cracks quickly; small grace.
+    cfg = {"grid": 13, "collapse": True, "collapse_start": 0,
+           "ring_interval": 1, "decay_ticks": 20, "keep_rings": 1}
+    st = g.init_state(cfg, _slots(1))
+    f = next(iter(st.fighters.values()))
+    # Park the fighter on an outer ring-0 cell (an edge cell) and advance time.
+    f.x, f.y = 1, 6
+    st.tick = st.round_start + 5      # ring 0 began cracking at e=0
+    obs = g.observe(st, f_id := next(iter(st.fighters)))
+    ground = obs["you"]["ground"]
+    assert ground["state"] in ("cracking", "void")
+    assert ground["falls_in"] is not None and ground["falls_in"] <= 20
+    # A central kept-core tile never falls: falls_in is null.
+    f.x, f.y = 6, 6
+    assert g.observe(st, f_id)["you"]["ground"]["falls_in"] is None

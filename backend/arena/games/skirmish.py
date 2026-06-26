@@ -25,7 +25,9 @@ distance d you see the row of 2d+1 cells (3 immediately ahead, then 5, then 7, .
 out to `sight`, minus any cell hidden behind a wall. Coordinates are relative to
 where you face: `forward` (1..sight) and `right` (negative is left).
     you:  {x, y, facing, hearts, alive, can_move, can_fire, score, frags, territory,
-           exposed, camp_ticks, expose_at, last_hit}
+           exposed, camp_ticks, expose_at, last_hit,
+           ground: {state: solid|cracking|void, decay, falls_in},  # the tile under you
+           out, out_reason, fell_tick, round_wins}
     view: {cells: [{forward, right, x, y, what: wall|empty|enemy, name?}],
            enemies: [{name, forward, right, distance, bearing}],
            bullets: [{x, y, dx, dy}],       # in-flight shots within sight, even from behind
@@ -194,8 +196,13 @@ META = GameMeta(
                                      "tick": {"type": "integer", "description": "Tick the hit landed."},
                                      "dir": {"enum": ["N", "E", "S", "W"], "description": "Absolute direction the bullet was travelling."},
                                      "from": {"enum": ["ahead", "right", "behind", "left"], "description": "Bearing of the shooter relative to your facing."}}},
+                    "ground": {"type": "object", "description": "The state of the tile you are standing on, so you know when to step off before it falls.",
+                               "properties": {
+                                   "state": {"enum": ["solid", "cracking", "void"], "description": "solid: stable. cracking: visibly breaking, about to fall. void: already a hole (you should not be here)."},
+                                   "decay": {"type": "integer", "description": "Visible crack stage 0..decay_stages-1 (0 = no cracks)."},
+                                   "falls_in": {"type": ["integer", "null"], "description": "Ticks until this tile becomes void and you fall. Counts down even while the tile still looks solid. null if it never falls (the kept centre, or collapse disabled). Step off before it reaches 0."}}},
                     "out": {"type": "boolean", "description": "You fell into the void this round: out for the rest of the current round (score 0 further this round). You respawn at the start of the next round, like a downed fighter. Round-scoped, cleared on respawn."},
-                    "out_reason": {"type": ["string", "null"], "description": "\"fell into the void this round\" when out, else null."},
+                    "out_reason": {"type": ["string", "null"], "description": "When out, explains you fell into the void because the floor under you collapsed before you stepped off it; else null."},
                     "fell_tick": {"type": ["integer", "null"], "description": "Absolute tick you fell into the void this round, or null if you have not fallen this round. Cleared on respawn."},
                     "round_wins": {"type": "integer", "description": "Rounds you have won this match. The match ends when a fighter reaches rounds_to_win (see the top-level match block)."},
                 },
@@ -892,6 +899,13 @@ class Skirmish:
         safe_ring = _safe_ring(cfg, rings_total, e)
         collapsing = bool(cfg.get("collapse", True))
         keep_from = rings_total - cfg["keep_rings"]
+        # The ground directly under you: its state (solid/cracking/void), crack
+        # stage, and ticks until it falls, so you can step off a cracking tile in
+        # time. falls_in counts down even while the tile still looks solid; once it
+        # reaches 0 the tile becomes void and you fall (out for the round).
+        own_ring = min(f.x, state.grid - 1 - f.x, f.y, state.grid - 1 - f.y)
+        g_state, g_decay, g_falls = _tile_status(cfg, own_ring, rings_total, e)
+        ground = {"state": g_state, "decay": g_decay, "falls_in": g_falls}
         next_fall_tick = (state.round_start + cfg["collapse_start"]
                           + safe_ring * cfg["ring_interval"] + cfg["decay_ticks"]) \
             if collapsing and safe_ring < keep_from else None
@@ -908,8 +922,10 @@ class Skirmish:
                     "territory": round(f.terr, 2), "exposed": f.exposed,
                     "camp_ticks": f.idle, "expose_at": cfg["expose_ticks"],
                     "last_hit": f.last_hit,
+                    "ground": ground,
                     "out": f.out,
-                    "out_reason": "fell into the void this round" if f.out else None,
+                    "out_reason": ("you fell into the void: the floor under you "
+                                   "collapsed before you stepped off it" if f.out else None),
                     "fell_tick": f.fell_tick,
                     "round_wins": f.round_wins},
             "view": view,

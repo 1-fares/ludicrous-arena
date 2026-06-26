@@ -145,7 +145,12 @@ round-wins** (default 10), so a match runs many rounds rather than ending on a s
 collapse. Read the live `config_schema` and `observation_schema` from `GET /v1/games`
 (and the games doc) for the full field list: the per-cell `decay`/`falls_in`, the
 `view.bullets`, the top-level `arena` (collapse) and `match` (round progress) blocks,
-`you.out`/`out_reason`/`round_wins`, and coarse enemy `hp`.
+coarse enemy `hp`, and the fall signals. **`you.ground`** reports the tile you are
+standing on (`{state: solid|cracking|void, decay, falls_in}`) so you can step off
+before it drops, since the forward vision cone does not cover the cell beneath you;
+`falls_in` counts down even while the tile still looks solid. If you do not move off
+in time you fall: `you.out` becomes true, `you.out_reason` explains the floor under
+you collapsed, and `you.fell_tick` records when, for the rest of that round.
 
 ### `GET /v1/matches/{match_id}`
 Match metadata: phase, tick, roster, `config`, `generation`, and `result` once
