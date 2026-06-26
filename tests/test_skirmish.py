@@ -265,3 +265,17 @@ def test_drop_after_removes_an_inactive_fighter():
         g.tick(st, 0.1)
     assert "p2" not in st.fighters and "p1" in st.fighters
     assert g.active_players(st) == {"p1"}
+
+
+def test_dead_player_waiting_to_respawn_is_not_dropped():
+    # The bug behind "5-player game restarted with 3": a fighter eliminated in a long
+    # round stops acting (nothing to do while dead) and must NOT be dropped for it.
+    g = _game()
+    st = g.init_state({"grid": 13, "drop_after": 3, "score_to_win": 99}, _slots(3))
+    st.fighters["p3"].alive = False          # eliminated; p1 and p2 still fighting
+    for _ in range(10):                      # long round, well past drop_after
+        g.apply(st, "p1", {"type": "wait"})
+        g.apply(st, "p2", {"type": "wait"})
+        g.tick(st, 0.1)
+    assert "p3" in st.fighters                # dead-and-waiting is kept
+    assert st.phase == "fighting" and "p1" in st.fighters and "p2" in st.fighters

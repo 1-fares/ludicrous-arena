@@ -453,11 +453,13 @@ class Skirmish:
                 f.move_cd -= 1
             if f.fire_cd > 0:
                 f.fire_cd -= 1
-            # Drop a gone client: no action for drop_after ticks removes the player
-            # from the game entirely (no phantom body left behind). If they reconnect
-            # they re-join as a fresh player at score 0. (Stamp the tick we noticed,
-            # so a fighter created this tick gets a full grace window.)
-            if drop and state.tick - f.last_act >= drop:
+            # Drop a gone client: an ALIVE fighter that submits no action for
+            # drop_after ticks during a fight is a disconnected client, remove it
+            # from the game (no phantom body). A dead fighter waiting to respawn
+            # legitimately sends nothing, so it is never dropped; it gets a fresh
+            # grace window on respawn (_new_round resets last_act). If a dropped
+            # player reconnects they re-join as a fresh player at score 0.
+            if drop and f.alive and state.phase == "fighting" and state.tick - f.last_act >= drop:
                 dropped.append(pid)
                 continue
             # Idle tracking: staying in one cell raises idle; moving resets it. Past
