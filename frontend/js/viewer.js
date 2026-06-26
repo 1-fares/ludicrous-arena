@@ -20,9 +20,9 @@ const POLL_HZ = 8;
 const PALETTE = [0x7cc4ff, 0xff7c7c, 0x9cff7c, 0xffd27c, 0xc77cff, 0x7cffe1, 0xff7cd2, 0xe1ff7c];
 const statusEl = document.getElementById("status");
 const scoreboard = document.getElementById("scoreboard");
+const sbTitle = document.getElementById("sbtitle");
 const scoresEl = document.getElementById("scores");
 const healthWrap = document.getElementById("healthwrap");
-const healthEl = document.getElementById("health");
 const banner = document.getElementById("banner");
 const bannerText = document.getElementById("bannerText");
 
@@ -495,13 +495,12 @@ function makeSkirmishRenderer() {
       const roundsToWin = d.match?.rounds_to_win ?? d.score_to_win ?? 0;
       const roundWins = d.match?.round_wins || {};
       const winsOf = (p) => (typeof p.round_wins === "number" ? p.round_wins : (roundWins[p.name] || 0));
-      const ranked = d.players.slice().sort((a, b) => (winsOf(b) - winsOf(a)) || (b.score - a.score));
-      renderScores(ranked.map(p => ({ label: p.name, score: p.score, frags: p.frags,
-        exposed: p.exposed, out: p.out, wins: winsOf(p), color: colorFor(d.players.indexOf(p)) })),
-        "score = frags + new ground", { round, roundsToWin });
-      renderHealth(d.players.map((p, i) => ({ name: p.name, hearts: p.hearts,
-        max: d.hearts_max, alive: p.alive, out: p.out, color: colorFor(i) })));
-      statusExtra = `round ${round} - first to ${roundsToWin}`;
+      renderSkirmishBoard(d.players.map((p, i) => ({
+        name: p.name, color: colorFor(i), wins: winsOf(p),
+        score: p.score, frags: p.frags, hearts: p.hearts, max: d.hearts_max,
+        alive: p.alive, exposed: p.exposed, out: p.out,
+      })), round, roundsToWin);
+      statusExtra = `round ${round} · first to ${roundsToWin}`;
     },
     lerp(dt) {
       const d = dt || 0.016;
@@ -654,7 +653,6 @@ function makeDeathmatchRenderer() {
       });
       for (const [i, rec] of shots) if (i >= nn) rec.mesh.visible = false;
       renderScores(d.players.map((p, i) => ({ label: p.name, score: p.score, color: colorFor(i) })));
-      renderHealth(null);
     },
     lerp() {
       for (const rec of players.values()) {
@@ -718,7 +716,6 @@ function makeLockdownRenderer() {
       for (const [id, rec] of pawns) if (!seen.has(id)) { root.remove(rec.mesh); pawns.delete(id); }
       renderScores([{ label: "Extracted", score: `${d.delivered}/${d.total}`, color: 0x39d98a },
                     { label: "Ticks left", score: d.time_left, color: 0x7cc4ff }]);
-      renderHealth(null);
     },
     lerp() { for (const { mesh, target } of pawns.values()) mesh.position.lerp(target, 0.3); },
   };
@@ -765,7 +762,6 @@ function makeFinanceRenderer() {
       }
       renderScores(d.players.slice().sort((a, b) => b.equity - a.equity)
         .map(p => ({ label: `${p.name} (pos ${p.position}${p.done ? " ✓" : ""})`, score: Math.round(p.equity), color: colorFor(d.players.indexOf(p)) })));
-      renderHealth(null);
     },
     lerp() {
       for (const rec of bars.values()) {
@@ -780,40 +776,83 @@ function makeFinanceRenderer() {
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-// Filled/empty pips for a fighter's round-wins, sized to the rounds-to-win target so the
-// scoreboard reads "how close to taking the match". Capped so a long target cannot overflow.
-function winPips(wins, target) {
-  const span = Math.min(Math.max(wins, target || 0), 7);
-  if (!span) return "";
-  let s = "";
-  for (let i = 0; i < span; i++) s += i < wins ? "●" : "○";
-  return ` <span class="wins" title="${wins} round win${wins === 1 ? "" : "s"}">${s}</span>`;
-}
-function renderScores(rows, legend, progress) {
+// Generic score panel (deathmatch / lockdown / trading_desk): name + a single number.
+function renderScores(rows, legend) {
   scoreboard.hidden = false;
-  const prog = progress && progress.roundsToWin
-    ? `<div class="progress">Round ${esc(progress.round)} / first to ${esc(progress.roundsToWin)}</div>` : "";
+  healthWrap.hidden = true;
+  if (sbTitle) sbTitle.textContent = "Scoreboard";
   const head = legend ? `<div class="legend">${esc(legend)}</div>` : "";
-  scoresEl.innerHTML = prog + head + rows.map(r => {
-    const pips = r.wins != null ? winPips(r.wins, progress?.roundsToWin) : "";
-    const detail = r.frags != null
-      ? ` <span class="sub">${r.frags} frag${r.frags === 1 ? "" : "s"}${r.exposed ? " · <b class='exp'>EXPOSED</b>" : ""}${r.out ? " · <b class='out'>OUT</b>" : ""}</span>`
-      : "";
-    return `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}${pips}${detail}</span><b>${esc(r.score)}</b></div>`;
-  }).join("");
+  scoresEl.innerHTML = head + rows.map(r =>
+    `<div class="row"><span class="who"><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}</span><b>${esc(r.score)}</b></div>`
+  ).join("");
 }
-function renderHealth(rows) {
-  if (!rows) { healthWrap.hidden = true; return; }
-  healthWrap.hidden = false;
-  healthEl.innerHTML = rows.map(r => {
-    const hearts = "♥".repeat(Math.max(0, r.hearts)) + "♡".repeat(Math.max(0, r.max - r.hearts));
-    // Three states: alive shows hearts; eliminated (fell into the void) is a distinct
-    // purple "out"; merely downed shows "down" (it will respawn this round).
-    const right = r.out
-      ? `<span class="hearts" style="color:#b07cff">out</span>`
-      : `<span class="hearts" style="color:${r.alive ? "#ff6b7a" : "#56607a"}">${r.alive ? hearts : "down"}</span>`;
-    return `<div class="row"><span class="name${(r.alive && !r.out) ? "" : " dead"}"><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:${hex(r.color)}"></span>${esc(r.name)}</span>${right}</div>`;
+
+// Skirmish standings panel. Two clearly separated sections so the match reads at a glance:
+// round-wins progress toward the target (primary, the wins decide the match) and the
+// this-round live state of each fighter in plain words (secondary, the per-round detail).
+// Replaces the old generic renderScores/renderHealth pair for skirmish.
+function renderSkirmishBoard(players, round, roundsToWin) {
+  scoreboard.hidden = false;
+  healthWrap.hidden = true;
+  if (sbTitle) sbTitle.textContent = "STANDINGS";
+
+  // Header: state the win condition and the current round. Never pair the round number
+  // and the target as a single comparable "N / M" (that reads as a contradiction).
+  const subtitle = roundsToWin
+    ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>` : "";
+  const roundLine = round >= 1
+    ? `<div class="muted">Round ${esc(round)} in progress</div>`
+    : `<div class="muted">Match not started</div>`;
+
+  // Match progress: a row per player, sorted by round wins then this-round score, each with
+  // a bar of exactly rounds-to-win segments (filled = wins) so closeness to the target is
+  // obvious. A large target drops the bar for a plain count to keep the panel from overflowing.
+  const ranked = players.slice().sort((a, b) => (b.wins - a.wins) || (b.score - a.score));
+  const bigTarget = roundsToWin > 15;
+  const progRows = ranked.map(p => {
+    const wins = `<span class="winnum">${esc(p.wins)}</span>`;
+    const tail = bigTarget
+      ? `<span class="winnum">/${esc(roundsToWin)}</span>`
+      : `<span class="bar" title="${esc(p.wins)} of ${esc(roundsToWin)} round wins">${winSegs(p.wins, roundsToWin)}</span>`;
+    return `<div class="prow"><span class="who"><span class="dot" style="background:${hex(p.color)}"></span>${esc(p.name)}</span>${wins}${tail}</div>`;
   }).join("");
+
+  // This round: each fighter's live state in plain words plus this round's score. Hearts for
+  // the living, "revealed" for an exposed camper, "down"/"fell" for the two ways out.
+  const roundRows = players.map(thisRoundRow).join("");
+
+  scoresEl.innerHTML =
+    subtitle + roundLine +
+    `<div class="section">Rounds won${roundsToWin ? ` (first to ${esc(roundsToWin)})` : ""}</div>` + progRows +
+    `<div class="section">This round</div>` +
+    `<div class="legend">score = frags + new ground</div>` + roundRows +
+    `<div class="foot">down = shot, respawns next round. fell = stepped off a collapsing tile too` +
+    ` late, out this round. revealed = stood still too long, visible to all.</div>`;
+}
+
+// rounds-to-win segments for the progress bar: the first `wins` filled, the remainder empty.
+function winSegs(wins, target) {
+  let s = "";
+  for (let i = 0; i < target; i++) s += `<i class="${i < wins ? "on" : ""}"></i>`;
+  return s;
+}
+
+// One this-round row: plain-word state (never the bare "OUT"/"EXPOSED" caps) and the score.
+function thisRoundRow(p) {
+  const dot = `<span class="dot" style="background:${hex(p.color)}"></span>`;
+  let main, hint = "", gone = false;
+  if (p.out) {                         // fell into the void: out for the rest of this round
+    main = `<span class="state fell">fell</span>`; hint = "out this round"; gone = true;
+  } else if (!p.alive) {               // shot down: respawns at the next round
+    main = `<span class="state down">down</span>`; hint = "back next round"; gone = true;
+  } else {                             // alive: hearts, plus a "revealed" tag if exposed
+    const hearts = "♥".repeat(Math.max(0, p.hearts)) + "♡".repeat(Math.max(0, p.max - p.hearts));
+    main = `<span class="hearts">${hearts}</span>` + (p.exposed ? `<span class="tag">revealed</span>` : "");
+  }
+  const who = `<span class="who${gone ? " gone" : ""}">${dot}${esc(p.name)}</span>`;
+  const end = `<span class="tend">${main}<b>${esc(p.score)}</b></span>`;
+  const hintLine = hint ? `<div class="thint">${esc(hint)}</div>` : "";
+  return `<div class="trow">${who}${end}</div>${hintLine}`;
 }
 
 // ---- toasts (players joining / dropping) ---------------------------------

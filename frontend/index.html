@@ -23,21 +23,41 @@
            background: #2a2210; border-radius: 4px; padding: 2px 6px; }
     #hud button[disabled] { opacity: .4; cursor: default; }
     #status { margin-left: auto; color: #6b7790; }
-    #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 180px;
+    #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 210px; max-width: 320px;
            background: #0b0e14cc; border: 1px solid #1c2538; border-radius: 8px; padding: 10px 12px; }
     #scoreboard h3 { margin: 0 0 6px; font-size: 12px; color: #6b7790; text-transform: uppercase; letter-spacing: 1px; }
-    #scoreboard .progress { font-size: 11px; color: #9cc4ff; letter-spacing: .5px; margin: -2px 0 6px;
-           border-bottom: 1px solid #1c2538; padding-bottom: 5px; }
-    #scoreboard .legend { font-size: 11px; color: #6b7790; margin: -2px 0 6px; }
-    #scoreboard .wins { color: #ffd27c; letter-spacing: 1px; font-size: 11px; }
-    #scoreboard .sub { font-size: 11px; color: #7c89a3; }
-    #scoreboard .sub .exp { color: #ffb14a; font-weight: 700; }
-    #scoreboard .sub .out { color: #b07cff; font-weight: 700; }
+    /* Header: the win condition and the current round, never paired as a comparable "N / M". */
+    #scoreboard .sb-sub { font-size: 11px; color: #9cc4ff; margin: 0 0 2px; }
+    #scoreboard .sb-sub b { color: #cfe2ff; }
+    #scoreboard .muted { font-size: 11px; color: #6b7790; }
+    #scoreboard .section { font-size: 11px; color: #6b7790; text-transform: uppercase; letter-spacing: 1px;
+           margin: 10px 0 4px; border-top: 1px solid #1c2538; padding-top: 7px; }
+    #scoreboard .legend { font-size: 11px; color: #7c89a3; margin: 0 0 5px; }
+    /* Generic score rows (deathmatch / lockdown / trading_desk) and shared bits. */
     #scoreboard .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
-    #scoreboard .row .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-    #health .row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; align-items: center; }
-    #health .hearts { letter-spacing: 1px; }
-    #health .name.dead { opacity: .45; text-decoration: line-through; }
+    #scoreboard .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+    #scoreboard .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #scoreboard .who.gone { opacity: .5; }
+    /* Match-progress rows: name, round-win count, and a bar of rounds-to-win segments. */
+    #scoreboard .prow { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+    #scoreboard .prow .who { flex: 1; min-width: 0; }
+    #scoreboard .winnum { color: #ffd27c; font-weight: 700; min-width: 14px; text-align: right; }
+    #scoreboard .bar { display: inline-flex; gap: 2px; flex-wrap: wrap; }
+    #scoreboard .bar i { width: 7px; height: 11px; border-radius: 2px; background: #23304a; }
+    #scoreboard .bar i.on { background: #ffd27c; }
+    /* This-round rows: live state in plain words plus this round's score. */
+    #scoreboard .trow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 3px 0 0; }
+    #scoreboard .trow .who { flex: 1; min-width: 0; }
+    #scoreboard .tend { display: inline-flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+    #scoreboard .hearts { color: #ff6b7a; letter-spacing: 1px; }
+    #scoreboard .tag { font-size: 10px; letter-spacing: .5px; color: #ffb14a; border: 1px solid #5a4520;
+           background: #2a2210; border-radius: 4px; padding: 1px 5px; }
+    #scoreboard .state { font-weight: 700; }
+    #scoreboard .state.down { color: #7c89a3; }
+    #scoreboard .state.fell { color: #b07cff; }
+    #scoreboard .thint { font-size: 10px; color: #56607a; padding-left: 15px; margin: 0 0 2px; }
+    #scoreboard .foot { font-size: 10px; color: #56607a; line-height: 1.35; margin-top: 9px;
+           border-top: 1px solid #1c2538; padding-top: 7px; }
     #hint { position: fixed; left: 14px; bottom: 12px; color: #56607a;
             font-size: 12px; background: #0b0e14aa; border: 1px solid #1c2538;
             border-radius: 6px; padding: 5px 9px; pointer-events: none; }
@@ -69,7 +89,7 @@
     <span id="status">idle</span>
   </div>
   <div id="scoreboard" hidden>
-    <h3>Scoreboard</h3><div id="scores"></div>
+    <h3 id="sbtitle">Scoreboard</h3><div id="scores"></div>
     <div id="healthwrap" hidden><h3 style="margin-top:12px">Health</h3><div id="health"></div></div>
   </div>
   <div id="hint">You are spectating &middot; agents play via the API &middot; drag to rotate &middot; scroll to zoom</div>
@@ -84,6 +104,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=20"></script>
+  <script type="module" src="./js/viewer.js?v=21"></script>
 </body>
 </html>
