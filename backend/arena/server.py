@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from arena import auth, registry, store
 from arena.engine import Engine, NotParticipant
 from arena.models import (
-    ActionAck,
     ActionRequest,
     BreakRequest,
     CreateMatchRequest,
@@ -91,11 +90,13 @@ and `dev-token-2` .. `dev-token-4` for multi-agent play.
 2. `POST /v1/matches/{id}/join`.
 3. Wait until the match `phase` is `running` by polling the public
    `GET /v1/matches/{id}` (your private `/state` returns 409 until the match starts).
-4. Loop: `GET /v1/matches/{id}/state` -> decide -> `POST /v1/matches/{id}/actions`,
-   about once per tick. `state.seat.player_id` is your id, `state.seat.rejected` tells
-   you why an action was dropped, and `state.observation` has the shape of that
-   game's `observation_schema`. Note: `state.seat` (your identity) is distinct from
-   `state.observation.you` (your in-world pose); they are different objects.
+4. Loop, about once per tick: `POST /v1/matches/{id}/actions` returns your next
+   view in the same call, so one round trip both submits and observes (use
+   `GET /v1/matches/{id}/state` only when you are not submitting, e.g. waiting on
+   other players). `seat.player_id` is your id, `seat.rejected` tells you why an
+   action was dropped, and `observation` has the shape of that game's
+   `observation_schema`. Note: `seat` (your identity) is distinct from
+   `observation.you` (your in-world pose); they are different objects.
 5. Stop when `state.phase` is `finished` (not when `result` appears: it is null until
    then); `state.result` then holds `winners`, `winner_names`, and `scores`.
 
@@ -320,23 +321,28 @@ def get_scene(match_id: str = _MATCH_ID) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
 
 
-@app.post("/v1/matches/{match_id}/actions", response_model=ActionAck, tags=["play"],
-          summary="Submit actions", responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, **E_CONFLICT})
+@app.post("/v1/matches/{match_id}/actions", response_model=StateResponse, tags=["play"],
+          summary="Submit actions and read back your view",
+          responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, **E_CONFLICT})
 def submit_actions(req: ActionRequest, match_id: str = _MATCH_ID,
                    identity: _Identity = Depends(auth.require_identity)) -> dict[str, Any]:
-    """Submit one or more game-specific actions, applied in order at the next tick.
-    Illegal actions are dropped silently and surfaced under `seat.rejected` on your
-    next `state` read. All actions in the list apply in submitted order in one tick.
-    See the game's `action_schema` (GET /v1/games) for shapes."""
+    """Submit one or more game-specific actions and get your view back in one call.
+    The actions apply in submitted order at the next tick, and the response is the
+    same envelope as `GET .../state` computed *after* the apply ({match_id, tick,
+    phase, seat, observation, result}). This is the **canonical per-tick call**: one
+    round trip submits and observes, so a playing agent does not also need to GET
+    `.../state`. `seat.rejected` here lists the reasons any action in *this*
+    submission was refused. Illegal actions are dropped, not fatal. See the game's
+    `action_schema` (GET /v1/games) for shapes. (`GET .../state` remains for
+    read-only polling when you are not submitting, e.g. waiting on other players.)"""
     try:
-        tick = ENGINE.submit_actions(match_id, identity.user_id, req.actions)
+        return ENGINE.submit_actions(match_id, identity.user_id, req.actions)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
     except NotParticipant as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return {"queued": len(req.actions), "tick": tick}
 
 
 # -- Lambda entrypoint ------------------------------------------------------

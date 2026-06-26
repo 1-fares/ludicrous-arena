@@ -58,8 +58,13 @@ def test_full_match_flow(client):
     NOW[0] += 0.5
     r = client.post(f"/v1/matches/{mid}/actions",
                     json={"actions": [{"type": "move", "dx": 1, "dy": 0}]}, headers=H1)
-    assert r.status_code == 200 and r.json()["queued"] == 1
-    assert r.json()["tick"] == 5
+    assert r.status_code == 200, r.text
+    # The action POST returns the same envelope as GET /state, computed after the
+    # apply, so one round trip per tick suffices.
+    posted = r.json()
+    assert posted["tick"] == 5
+    assert posted["seat"]["player_id"] == "p1"
+    assert "players" in posted["observation"]
 
     body = client.get(f"/v1/matches/{mid}/state", headers=H1).json()
     assert body["tick"] == 5
@@ -102,7 +107,11 @@ def test_skirmish_full_flow(client):
 
     r = client.post(f"/v1/matches/{mid}/actions",
                     json={"actions": [{"type": "turn", "to": "left"}, {"type": "fire"}]}, headers=H1)
-    assert r.status_code == 200 and r.json()["queued"] == 2
+    assert r.status_code == 200, r.text
+    # POST returns the post-apply view in one call: seat + a populated observation.
+    posted = r.json()
+    assert posted["seat"]["player_id"] == "p1"
+    assert "you" in posted["observation"] and "view" in posted["observation"]
 
     scene = client.get(f"/v1/matches/{mid}/scene").json()
     assert scene["scene"]["walls"] and len(scene["scene"]["players"]) == 2
@@ -186,6 +195,34 @@ def test_join_uses_token_name_when_omitted(client):
                       headers=_admin_headers()).json()["match_id"]
     info = client.post(f"/v1/matches/{mid}/join", json={}, headers=H2).json()
     assert any(p["display_name"] == "Dev Player 2" for p in info["players"])
+
+
+def test_finished_match_state_no_403_for_pruned_participant(client):
+    # Item J at the HTTP boundary: a past participant whose slot was pruned still
+    # gets 200 and the frozen result on a finished match, not 403.
+    mid = client.post("/v1/matches",
+                      json={"game_id": "skirmish",
+                            "config": {"grid": 11, "drop_after": 3, "score_to_win": 1},
+                            "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    client.post(f"/v1/matches/{mid}/join", json={"display_name": "A"}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={"display_name": "B"}, headers=H2)
+    client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
+    # H1 keeps acting; H2 never does and is pruned from the roster.
+    for _ in range(8):
+        NOW[0] += 0.1
+        client.post(f"/v1/matches/{mid}/actions", json={"actions": [{"type": "wait"}]}, headers=H1)
+    # Force a finish by giving p1 (H1) the score limit, then a read finalizes it.
+    rec, ver = server._STORE.get_match_state(mid)
+    rec.state["fighters"]["p1"]["frags"] = 1
+    server._STORE.put_match_state(mid, rec, ver)
+    NOW[0] += 0.1
+    assert client.get(f"/v1/matches/{mid}/scene").json()["phase"] == "finished"
+
+    r = client.get(f"/v1/matches/{mid}/state", headers=H2)
+    assert r.status_code == 200, r.text
+    assert r.json()["phase"] == "finished"
+    assert r.json()["result"]["winners"] == ["p1"]
 
 
 def test_named_room_is_stable_and_reused(client):

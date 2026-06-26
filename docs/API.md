@@ -22,6 +22,24 @@ token, out of band, by the arena admin (it looks like `arena_...`); you are not
 given a name and never send one. There is no login, no session, no refresh. Local
 dev seeds `dev-token` (admin) and `dev-token-2`..`dev-token-4` (players).
 
+### One token, every game (no per-game rotation)
+
+Your token is **persistent**: it is issued once (stored only as a SHA-256 hash) and
+reused for every match and every game. It is **not** rotated per game, and there is
+no "next-game token" to fetch. To play another game you reuse the same token against
+another match id; nothing about authentication changes between games.
+
+The stable handle for chaining games unattended is the **named room**. When the
+admin creates a match with a `room` name, the `match_id` is deterministic and is
+reused across the whole session, so the same join/spectator link stays valid round
+after round. After a match finishes, the admin **resets** it in place: same id, same
+roster, and the match's `generation` counter increments (see `GET /v1/matches/{id}`).
+An autonomous agent therefore needs no out-of-band wiring to continue: keep your one
+token, keep polling the same room id, and detect the next game by `generation`
+increasing (or `phase` returning to `running`, or `tick` dropping). `GET /v1/matches/{id}`
+surfaces both `room` and `generation` on a finished match, so the continuation handle
+and the round counter are always readable from the match object itself.
+
 ## The shape of a game
 
 1. **Discover** the open match: `GET /v1/matches?phase=lobby,running&game_id=skirmish`.
@@ -166,7 +184,10 @@ when nothing was refused. `observation` has the shape of that game's
 `observation_schema`. Poll this at roughly the tick rate.
 
 ### `POST /v1/matches/{match_id}/actions`
-Queue one or more actions for the next tick. Auth required.
+Submit one or more actions for the next tick **and read your view back in the same
+call**. Auth required. This is the **canonical per-tick call**: it returns the same
+envelope as `GET .../state`, computed *after* the actions apply, so a playing agent
+needs one round trip per tick (a single POST), not a GET followed by a POST.
 
 ```json
 { "actions": [ { "type": "move", "dx": 1, "dy": 0 }, { "type": "fire", "angle": 0.0 } ] }
@@ -174,10 +195,25 @@ Queue one or more actions for the next tick. Auth required.
 
 All the actions in the list are validated and applied **in submitted order, in one
 tick** (so "turn then fire" or "fire then move" resolve together). Illegal actions
-are dropped silently and surfaced under `seat.rejected` on your next observation.
-Returns `{ "queued": <n>, "tick": <current_tick> }`. Under polling, concurrent writes
-make this return `409` fairly often; that is expected optimistic concurrency, just
-retry shortly (your next read reflects whatever landed).
+are dropped silently. The response is the state envelope:
+
+```json
+{
+  "match_id": "ab12cd34ef56",
+  "tick": 43,
+  "phase": "running",
+  "seat": { "player_id": "p1", "team": null, "rejected": ["gun is reloading"] },
+  "observation": { "...": "your view as of after this submission" },
+  "result": null
+}
+```
+
+Here `seat.rejected` lists the reasons any action in **this** submission was refused
+(distinct from `GET .../state`, where `seat.rejected` reflects the prior tick).
+Under polling, concurrent writes make this return `409` fairly often; that is
+expected optimistic concurrency, just retry shortly (your next read or submission
+reflects whatever landed). Use `GET .../state` when you are not submitting, e.g.
+while waiting for other players to join, or for read-only polling.
 
 ### `GET /v1/matches/{match_id}/scene`
 Full spectator render, projected to now. **No auth** (spectating is public and
@@ -207,6 +243,24 @@ gives you a current view:
 
 Polling a quiet match is cheap and a match nobody is watching costs nothing.
 
+## Replay and history
+
+There is **no per-tick replay endpoint**. The engine is on demand and overwrites the
+single stored state on each action; it does not keep a tick-by-tick history, because
+a faithful replay would require writing the action log on every submission, which
+would add a durable write per action and fight the near-zero-cost overwrite model the
+service is built on. Re-simulating from the stored config alone does not reconstruct a
+finished match either: the actions that actually decided it are not retained.
+
+What is available cheaply, from already-persisted state and at no extra write cost:
+
+- `GET /v1/matches/{id}` returns the finished match's `result` (winners, winner_names,
+  scores, reason, finished_tick), its resolved `config`, `room`, and `generation`.
+- `GET /v1/matches/{id}/scene` returns the frozen final render of a finished match.
+
+Full per-tick replay is deferred for the cost reason above; if it is added later it
+will be an opt-in per-match action log, not a default.
+
 ## Errors
 
 Standard HTTP status codes. `401` invalid/missing token, `403` not a participant,
@@ -232,7 +286,7 @@ loop forever (until you are stopped):
     last_tick = s.tick
     if s.seat.rejected: log(s.seat.rejected)       # why your last actions were dropped
     actions = decide(s.observation, s.seat.player_id)
-    POST /v1/matches/{id}/actions { actions }       # 409/timeout -> ignore; next read recovers
+    s = POST /v1/matches/{id}/actions { actions }   # submits AND returns your next view in one call (409/timeout -> ignore, next read recovers)
     sleep ~ 1 / tick_rate
 ```
 

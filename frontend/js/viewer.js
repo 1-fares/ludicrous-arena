@@ -132,6 +132,60 @@ function makeLabel(text, color) {
   return spr;
 }
 
+// Deterministic PRNG (mulberry32) so a stage's procedural crack texture is stable
+// across polls instead of shimmering as it is regenerated.
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// A cracked-floor texture for one collapse stage. Higher stages darken the surface
+// toward charred and add more, brighter fault lines. The same canvas is used as the
+// emissive map, so the bright fault pixels glow while the dulled surface does not.
+function crackCanvasTexture(stage, stages) {
+  const frac = stages > 1 ? stage / (stages - 1) : 1;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 128;
+  const ctx = cv.getContext("2d");
+  // Base floor color (0x3b4660) darkening toward charred (0x241a12) with the stage.
+  const r = Math.round(0x3b + (0x24 - 0x3b) * frac);
+  const g = Math.round(0x46 + (0x1a - 0x46) * frac);
+  const b = Math.round(0x60 + (0x12 - 0x60) * frac);
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0, 0, 128, 128);
+  const rnd = mulberry32(stage * 0x9e3779b1 + 17);
+  for (let i = 0; i < 80; i++) {              // charred speckle, denser at high stages
+    ctx.fillStyle = `rgba(10,8,6,${(0.05 + 0.25 * frac * rnd()).toFixed(3)})`;
+    const s = 2 + rnd() * 5;
+    ctx.fillRect(rnd() * 128, rnd() * 128, s, s);
+  }
+  const lines = 2 + stage * 2;               // glowing fault lines from edge toward centre
+  for (let i = 0; i < lines; i++) {
+    let x = rnd() * 128, y = rnd() < 0.5 ? 0 : 128;
+    if (rnd() < 0.5) { y = rnd() * 128; x = rnd() < 0.5 ? 0 : 128; }
+    const heat = 0.4 + 0.6 * frac;
+    ctx.strokeStyle = `rgb(${Math.round(180 + 75 * heat)},${Math.round(70 + 60 * heat)},${Math.round(20 * heat)})`;
+    ctx.lineWidth = 1 + 2 * frac;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    let cx = x, cy = y;
+    const steps = 4 + Math.floor(rnd() * 3);
+    for (let s2 = 0; s2 < steps; s2++) {     // jagged walk to read as a fracture
+      cx += (64 - cx) * (0.25 + rnd() * 0.3) + (rnd() - 0.5) * 26;
+      cy += (64 - cy) * (0.25 + rnd() * 0.3) + (rnd() - 0.5) * 26;
+      ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 // ---- per-game renderers ---------------------------------------------------
 const RENDERERS = {
   skirmish: makeSkirmishRenderer(),
@@ -141,30 +195,62 @@ const RENDERERS = {
 };
 
 function makeSkirmishRenderer() {
-  const fighters = new Map();   // id -> { group, label, target, heading, dead, hp, hitFlash }
+  const fighters = new Map();   // id -> { group, label, target, heading, dead, out, falling, fallen, vy, hp, hitFlash }
   const shots = new Map();      // index -> { mesh, target }
   let prevBullets = [];         // last poll's bullet positions, to spot newly-fired shots
-  let tAcc = 0;                 // accumulated time, for beacon bob/pulse
+  let tAcc = 0;                 // accumulated time, for beacon bob/pulse and crack pulse
   let floor = null, wallGroup = null, sig = "";
+  // Collapsing floor: the board is built from per-cell tiles so individual cells can
+  // crack, sink and fall away (a single plane cannot be punched to show a hole).
+  const tiles = new Map();      // "x,y" -> { mesh, state, decay, fallsIn, stage, sink, vy, crackMat }
+  const crackTex = new Map();   // stage -> CanvasTexture, shared by every cracking tile
+  let tileGeo = null, solidMat = null, curStages = 1;
+  const TILE_H = 0.3, VOID_DEPTH = 7;
+
+  function getCrackTex(stage, stages) {
+    let t = crackTex.get(stage);
+    if (!t) { t = crackCanvasTexture(stage, stages); crackTex.set(stage, t); }
+    return t;
+  }
+
+  // Per-tile crack materials and the stage textures live outside the scene graph once
+  // a tile reverts to solid, so disposeTree() (which only walks attached meshes) cannot
+  // reach them. Free them explicitly on rebuild and teardown.
+  function disposeFloorExtras() {
+    for (const t of tiles.values()) if (t.crackMat) { t.crackMat.dispose(); t.crackMat = null; }
+    for (const tex of crackTex.values()) tex.dispose();
+    crackTex.clear();
+  }
 
   function buildArena(d) {
     const s = `${d.grid}|${d.walls.length}`;
     if (sig === s) return;
     sig = s;
-    if (floor) root.remove(floor);
-    if (wallGroup) root.remove(wallGroup);
+    if (floor) { disposeTree(floor); root.remove(floor); }
+    if (wallGroup) { disposeTree(wallGroup); root.remove(wallGroup); }
+    disposeFloorExtras();
+    tiles.clear();
     const g = d.grid;
     floor = new THREE.Group();
-    // Lighter floor + brighter grid lines, easier to read than the old dark board.
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(g, g),
-      new THREE.MeshStandardMaterial({ color: 0x3b4660, roughness: 0.92 }));
-    plane.rotation.x = -Math.PI / 2;
-    plane.position.set(g / 2 - 0.5, 0, g / 2 - 0.5);
-    plane.receiveShadow = true;
-    floor.add(plane);
-    const grid = new THREE.GridHelper(g, g, 0x8fa6cc, 0x5a6a8c);
-    grid.position.set(g / 2 - 0.5, 0.01, g / 2 - 0.5);
-    floor.add(grid);
+    // Abyss seen through holes once the floor falls away: a dark unlit plane far below.
+    const abyss = new THREE.Mesh(new THREE.PlaneGeometry(g * 3, g * 3),
+      new THREE.MeshBasicMaterial({ color: 0x05070c }));
+    abyss.rotation.x = -Math.PI / 2;
+    abyss.position.set(g / 2 - 0.5, -VOID_DEPTH, g / 2 - 0.5);
+    floor.add(abyss);
+    // One thin tile per cell, top flush with y=0. The 0.96 width leaves a dark gap that
+    // reads as the old grid, and the box thickness gives holes a visible lip when a
+    // neighbour falls away. Geometry and the solid material are shared across tiles.
+    tileGeo = new THREE.BoxGeometry(0.96, TILE_H, 0.96);
+    solidMat = new THREE.MeshStandardMaterial({ color: 0x3b4660, roughness: 0.92 });
+    for (let x = 0; x < g; x++) for (let y = 0; y < g; y++) {
+      const m = new THREE.Mesh(tileGeo, solidMat);
+      m.position.set(x, -TILE_H / 2, y);
+      m.receiveShadow = true;
+      floor.add(m);
+      tiles.set(`${x},${y}`, { mesh: m, state: "solid", decay: 0, fallsIn: 99,
+        stage: -1, sink: 0, vy: 0, crackMat: null });
+    }
     root.add(floor);
 
     wallGroup = new THREE.Group();
@@ -177,6 +263,36 @@ function makeSkirmishRenderer() {
       wallGroup.add(m);
     }
     root.add(wallGroup);
+  }
+
+  // Reconcile the tile field with this poll's floor data. Void cells start dropping;
+  // cracking cells point their material at the matching stage texture; everything else
+  // returns to solid (a new round repairs the board). Animation happens in lerp().
+  function updateFloor(d) {
+    curStages = d.collapse?.stages || 1;
+    const crackMap = new Map();
+    (d.floor?.cracking || []).forEach(c => crackMap.set(`${c.x},${c.y}`, c));
+    const voidSet = new Set((d.floor?.void || []).map(([x, y]) => `${x},${y}`));
+    for (const [key, t] of tiles) {
+      if (voidSet.has(key)) {
+        if (t.state !== "void") { t.state = "void"; t.vy = 0; }   // begin the fall
+      } else if (crackMap.has(key)) {
+        const c = crackMap.get(key);
+        t.state = "crack"; t.decay = c.decay || 0; t.fallsIn = c.falls_in ?? 99;
+        const stage = Math.max(0, Math.min(curStages - 1, t.decay));
+        if (t.stage !== stage) {                  // (re)point the tile at this stage's look
+          t.stage = stage;
+          if (!t.crackMat) t.crackMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff, roughness: 0.8, emissive: 0xff7a1e, emissiveIntensity: 0 });
+          const tex = getCrackTex(stage, curStages);
+          t.crackMat.map = tex; t.crackMat.emissiveMap = tex; t.crackMat.needsUpdate = true;
+          t.mesh.material = t.crackMat;
+        }
+      } else if (t.state !== "solid") {            // repaired (new round): restore the tile
+        t.state = "solid"; t.stage = -1; t.decay = 0; t.fallsIn = 99; t.vy = 0;
+        t.mesh.material = solidMat; t.mesh.visible = true; t.mesh.rotation.set(0, 0, 0);
+      }
+    }
   }
 
   function makeFighter(color) {
@@ -224,9 +340,14 @@ function makeSkirmishRenderer() {
   }
 
   return {
-    reset() { fighters.clear(); shots.clear(); fx.length = 0; prevBullets = []; tAcc = 0; floor = null; wallGroup = null; sig = ""; },
+    reset() {
+      fighters.clear(); shots.clear(); fx.length = 0; prevBullets = []; tAcc = 0;
+      disposeFloorExtras(); tiles.clear();
+      floor = null; wallGroup = null; sig = ""; tileGeo = null; solidMat = null; curStages = 1;
+    },
     update(d) {
       buildArena(d);
+      updateFloor(d);
       camSize = d.grid; frameOnce();
 
       const seen = new Set();
@@ -240,7 +361,8 @@ function makeSkirmishRenderer() {
           label.position.set(p.x, 1.7, p.y);
           root.add(group); root.add(label);
           rec = { group, label, target: new THREE.Vector3(p.x, 0, p.y),
-                  heading: Math.atan2(-p.dy, p.dx), dead: !p.alive, hp: p.hearts, hitFlash: 0 };
+                  heading: Math.atan2(-p.dy, p.dx), dead: !p.alive,
+                  out: false, falling: false, fallen: false, vy: 0, hp: p.hearts, hitFlash: 0 };
           fighters.set(p.id, rec);
         }
         if (p.hearts < rec.hp) {            // lost a heart since the last poll: flash red
@@ -251,10 +373,22 @@ function makeSkirmishRenderer() {
         rec.hp = p.hearts;
         rec.target.set(p.x, 0, p.y);
         if (p.alive) rec.heading = Math.atan2(-p.dy, p.dx);
-        rec.dead = !p.alive;
+        rec.out = !!p.out;
+        rec.dead = !p.alive && !p.out;        // out (eliminated) drives its own fall, not the downed pose
+        if (rec.out && !rec.falling && !rec.fallen) {   // just dropped through the floor
+          rec.falling = true; rec.vy = 0;
+          spawnRing(p.x, p.y, 0x7a3ce0, 0.7, 0.3, 2.0, 0.1);   // dark burst marks the elimination
+        }
+        if (!rec.out && (rec.falling || rec.fallen)) {  // respawned / new round: lift back in
+          rec.falling = false; rec.fallen = false;
+          rec.group.visible = true; rec.label.visible = true;
+          rec.group.scale.setScalar(1);
+          rec.group.rotation.set(0, rec.group.rotation.y, 0);
+          rec.group.position.set(p.x, 0, p.y);
+        }
         rec.label.position.set(p.x, 1.7, p.y);
-        rec.label.material.opacity = p.alive ? 1 : 0.4;
-        rec.group.userData.beacon.visible = !!p.exposed && p.alive;
+        rec.label.material.opacity = p.out ? 0 : (p.alive ? 1 : 0.4);
+        rec.group.userData.beacon.visible = !!p.exposed && p.alive && !p.out;
       });
       for (const [id, rec] of fighters) if (!seen.has(id)) {
         disposeTree(rec.group); root.remove(rec.group);
@@ -289,15 +423,52 @@ function makeSkirmishRenderer() {
 
       const ranked = d.players.slice().sort((a, b) => b.score - a.score);
       renderScores(ranked.map(p => ({ label: p.name, score: p.score, frags: p.frags,
-        exposed: p.exposed, color: colorFor(d.players.indexOf(p)) })), "score = frags + new ground");
+        exposed: p.exposed, out: p.out, color: colorFor(d.players.indexOf(p)) })), "score = frags + new ground");
       renderHealth(d.players.map((p, i) => ({ name: p.name, hearts: p.hearts,
-        max: d.hearts_max, alive: p.alive, color: colorFor(i) })));
+        max: d.hearts_max, alive: p.alive, out: p.out, color: colorFor(i) })));
       statusExtra = `round ${d.round} · first to ${d.score_to_win}`;
     },
     lerp(dt) {
       const d = dt || 0.016;
       tAcc += d;
+      // Floor: drop void tiles under gravity, ease crack sink, pulse the danger glow.
+      for (const t of tiles.values()) {
+        if (t.state === "void") {
+          t.vy += d * 9;
+          t.mesh.position.y -= t.vy * d;
+          t.mesh.rotation.x += d * 1.5;            // tumble as it falls into the abyss
+          if (t.mesh.position.y < -VOID_DEPTH) t.mesh.visible = false;
+          continue;
+        }
+        let targetSink = 0;
+        if (t.state === "crack" && t.crackMat) {
+          const frac = curStages > 1 ? t.stage / (curStages - 1) : 1;
+          targetSink = 0.04 + 0.14 * frac;
+          // The nearer the fall, the brighter and more red the fault lines pulse.
+          const imminent = t.fallsIn <= 2 ? (3 - Math.max(0, t.fallsIn)) / 3 : 0;
+          const pulse = 0.5 + 0.5 * Math.sin(tAcc * 6);
+          t.crackMat.emissiveIntensity = 0.25 + 0.5 * frac + imminent * (0.6 + 0.8 * pulse);
+          t.crackMat.emissive.setHex(t.fallsIn <= 1 ? 0xff3010 : 0xff7a1e);
+          targetSink += imminent * 0.05 * pulse;
+        }
+        t.sink = lerpN(t.sink, targetSink, 0.15);
+        t.mesh.position.y = lerpN(t.mesh.position.y, -TILE_H / 2 - t.sink, 0.2);
+      }
       for (const rec of fighters.values()) {
+        if (rec.falling) {                         // eliminated: fall through the hole, tumbling
+          rec.vy += d * 11;
+          rec.group.position.y -= rec.vy * d;
+          rec.group.rotation.x += d * 7;
+          rec.group.rotation.z += d * 4;
+          rec.group.scale.multiplyScalar(1 - d * 0.6);
+          rec.label.material.opacity = Math.max(0, rec.label.material.opacity - d * 3);
+          if (rec.group.position.y < -VOID_DEPTH) {
+            rec.falling = false; rec.fallen = true;
+            rec.group.visible = false; rec.label.visible = false;   // gone from the board (spectating)
+          }
+          continue;
+        }
+        if (rec.fallen) continue;                  // stays hidden until a respawn / new round
         rec.group.position.lerp(rec.target, 0.22);
         // Ease heading along the shortest arc.
         let dh = rec.heading - rec.group.rotation.y;
@@ -514,7 +685,7 @@ function renderScores(rows, legend) {
   const head = legend ? `<div class="legend">${esc(legend)}</div>` : "";
   scoresEl.innerHTML = head + rows.map(r => {
     const detail = r.frags != null
-      ? ` <span class="sub">${r.frags} frag${r.frags === 1 ? "" : "s"}${r.exposed ? " · <b class='exp'>EXPOSED</b>" : ""}</span>`
+      ? ` <span class="sub">${r.frags} frag${r.frags === 1 ? "" : "s"}${r.exposed ? " · <b class='exp'>EXPOSED</b>" : ""}${r.out ? " · <b class='out'>OUT</b>" : ""}</span>`
       : "";
     return `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}${detail}</span><b>${esc(r.score)}</b></div>`;
   }).join("");
@@ -524,7 +695,12 @@ function renderHealth(rows) {
   healthWrap.hidden = false;
   healthEl.innerHTML = rows.map(r => {
     const hearts = "♥".repeat(Math.max(0, r.hearts)) + "♡".repeat(Math.max(0, r.max - r.hearts));
-    return `<div class="row"><span class="name${r.alive ? "" : " dead"}"><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:${hex(r.color)}"></span>${esc(r.name)}</span><span class="hearts" style="color:${r.alive ? "#ff6b7a" : "#56607a"}">${r.alive ? hearts : "out"}</span></div>`;
+    // Three states: alive shows hearts; eliminated (fell into the void) is a distinct
+    // purple "out"; merely downed shows "down" (it will respawn this round).
+    const right = r.out
+      ? `<span class="hearts" style="color:#b07cff">out</span>`
+      : `<span class="hearts" style="color:${r.alive ? "#ff6b7a" : "#56607a"}">${r.alive ? hearts : "down"}</span>`;
+    return `<div class="row"><span class="name${(r.alive && !r.out) ? "" : " dead"}"><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:${hex(r.color)}"></span>${esc(r.name)}</span>${right}</div>`;
   }).join("");
 }
 

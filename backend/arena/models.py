@@ -85,6 +85,7 @@ class MatchInfo(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Effective config for this match.")
     autostart: bool = Field(default=True, description="Whether the match starts automatically once `min_players` have joined.")
     players: list[PlayerSlot] = Field(default_factory=list, description="Current roster.")
+    participants: list[str] = Field(default_factory=list, description="User ids of everyone who ever joined this match, appended on join and never pruned. The live roster (`players`) can shrink when a client drops, but this list does not, so a past participant can still read the frozen result of a finished match.")
     max_players: int = Field(default=8, description="Maximum players the match accepts.")
     created_at: str = Field(description="ISO-8601 creation time (UTC).", examples=["2026-06-25T13:00:00Z"])
     room: Optional[str] = Field(default=None, description="Stable room name this match belongs to, if created as a named room (its id is then deterministic and reused).")

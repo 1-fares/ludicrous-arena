@@ -136,6 +136,12 @@ class Engine:
             slot = PlayerSlot(player_id=f"p{len(info.players) + 1}", user_id=user_id,
                               display_name=name, team=assigned)
             info.players.append(slot)
+            # Record the user as a participant for good. Unlike `players` (which the
+            # roster prune trims when a client drops), this list is never pruned, so
+            # a finished-match read can still recognise a past participant. Guard
+            # against a re-join after a prune adding the same user twice.
+            if user_id not in info.participants:
+                info.participants.append(user_id)
             # Put the player on the board at score 0 (the game decides how, via
             # add_player), whether the match is in the lobby (so they appear in the
             # waiting arena) or already running (a late join). A join while finished
@@ -302,6 +308,20 @@ class Engine:
         game, info, state, tick, result, rec, _ = self._project(match_id)
         slot = next((p for p in info.players if p.user_id == user_id), None)
         if slot is None:
+            # Finished match: a past participant whose live slot was pruned (e.g. a
+            # dropped client removed from the roster) still gets the frozen result
+            # rather than a 403. Their slot and game presence are gone, so the seat
+            # and observation are minimal stubs; the durable result is what matters.
+            # Running matches keep the strict check: only the live roster may read.
+            if info.phase == MatchPhase.finished and user_id in info.participants:
+                return {
+                    "match_id": match_id,
+                    "tick": info.tick,
+                    "phase": MatchPhase.finished.value,
+                    "seat": {"player_id": "", "team": None, "rejected": []},
+                    "observation": {"phase": MatchPhase.finished.value},
+                    "result": (info.result.model_dump() if info.result else None),
+                }
             raise NotParticipant("not a participant in this match")
         if state is None or info.phase == MatchPhase.lobby:
             raise ValueError("match has not started")
@@ -335,7 +355,12 @@ class Engine:
 
     # -- actions -----------------------------------------------------------
 
-    def submit_actions(self, match_id: str, user_id: str, actions: list[dict[str, Any]]) -> int:
+    def submit_actions(self, match_id: str, user_id: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply a batch of actions, then return the caller's state envelope as of
+        after the apply: the same shape as ``agent_view`` ({match_id, tick, phase,
+        seat, observation, result}). This lets a client run one round trip per tick
+        (a single POST) instead of POST-then-GET. ``seat.rejected`` here reflects
+        *this* submission, not the prior tick."""
         if len(actions) > _MAX_ACTIONS:
             raise ValueError(f"too many actions in one submission (max {_MAX_ACTIONS})")
         info, _ = self._load_info(match_id)
@@ -389,7 +414,19 @@ class Engine:
             self._prune_roster(match_id, game, state)  # drop players the game removed
             if result is not None:
                 self._lazy_finalize(match_id, result, tick)
-            return tick
+            # Return the post-apply envelope so the caller needs no follow-up read.
+            return {
+                "match_id": match_id,
+                "tick": tick,
+                "phase": (MatchPhase.finished if result else info.phase).value,
+                "seat": {
+                    "player_id": slot.player_id,
+                    "team": slot.team,
+                    "rejected": rejected,
+                },
+                "observation": game.observe(state, player_id),
+                "result": (result.model_dump() if result else None),
+            }
         raise ValueError("write contention; retry")
 
     def _prune_roster(self, match_id: str, game: Game, state: Any) -> None:

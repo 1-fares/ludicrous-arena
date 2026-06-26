@@ -187,7 +187,8 @@ def test_no_timeout_round_does_not_end_on_the_clock():
     # the (action-less) test fighters are not downed for inactivity; this isolates
     # the round-limit behaviour from the drop-out behaviour.
     g = _game()
-    st = g.init_state({"grid": 11, "round_limit": 0, "drop_after": 0}, _slots(2))
+    st = g.init_state({"grid": 11, "round_limit": 0, "drop_after": 0, "collapse": False},
+                      _slots(2))
     for _ in range(1200):          # far past any old timeout default
         g.tick(st, 0.1)
     assert st.phase == "fighting" and st.round == 1
@@ -314,3 +315,157 @@ def test_dead_player_waiting_to_respawn_is_not_dropped():
         g.tick(st, 0.1)
     assert "p3" in st.fighters                # dead-and-waiting is kept
     assert st.phase == "fighting" and "p1" in st.fighters and "p2" in st.fighters
+
+
+# ---- collapsing arena -----------------------------------------------------
+
+def _collapse_cfg(**over):
+    # A fast, fully determined collapse schedule for tests. rings_total on grid 11 is
+    # 5 (rings 0..4); keep_rings 2 keeps rings 3 and 4, so rings 0,1,2 fall.
+    cfg = {"grid": 11, "seed": 1, "collapse": True, "collapse_start": 5,
+           "ring_interval": 100, "decay_ticks": 5, "decay_stages": 4, "keep_rings": 2,
+           "drop_after": 0, "hearts": 3, "score_to_win": 99}
+    cfg.update(over)
+    return cfg
+
+
+def _clear_interior(st):
+    st.walls = [w for w in st.walls if w[0] in (0, st.grid - 1) or w[1] in (0, st.grid - 1)]
+
+
+def test_outer_ring_falls_on_schedule_and_eliminates_for_the_match():
+    # An outer-ring tile falls at its scheduled tick. A fighter standing alive on it
+    # goes out (eliminated for the match, 0 points, no respawn); a fighter in the kept
+    # core survives.
+    g = _game()
+    st = g.init_state(_collapse_cfg(), _slots(2))
+    _clear_interior(st)
+    p1, p2 = st.fighters["p1"], st.fighters["p2"]
+    p1.x, p1.y, p1.px, p1.py = 1, 1, 1, 1     # ring 0 (outer edge): begin=5, fall=10
+    p2.x, p2.y, p2.px, p2.py = 5, 5, 5, 5     # centre: kept core, never falls
+    # The schedule is a pure function of elapsed ticks: solid before the fall, void at it.
+    assert (1, 1) not in g._void_at(st, 9)
+    assert (1, 1) in g._void_at(st, 10)
+    assert (5, 5) not in g._void_at(st, 10_000)
+    for _ in range(10):
+        g.tick(st, 0.1)
+    assert st.tick == 10
+    assert p1.out and not p1.alive and p1.fell_tick == 10
+    assert not p2.out and p2.alive
+    # An out fighter scores 0 and reports it, even with frags banked.
+    p1.frags = 7
+    you = g.observe(st, "p1")["you"]
+    assert you["out"] is True and you["score"] == 0 and you["out_reason"] == "fell into the void"
+    assert g.observe(st, "p1")["scores"][p1.name] == 0
+
+
+def test_downed_fighter_is_not_made_out_by_collapse():
+    # A fighter already down (not alive) is lying low: a tile falling under it does not
+    # make it out. It respawns next round as normal.
+    g = _game()
+    st = g.init_state(_collapse_cfg(), _slots(2))
+    _clear_interior(st)
+    p1 = st.fighters["p1"]
+    p1.x, p1.y, p1.px, p1.py = 1, 1, 1, 1
+    p1.alive = False                          # downed before the floor falls
+    for _ in range(10):
+        g.tick(st, 0.1)
+    assert not p1.out and p1.fell_tick is None
+
+
+def test_vision_sees_across_void():
+    # A void tile is a hole, not a wall: it does not block line of sight. Looking from
+    # the kept core across fallen tiles, the border beyond is still visible, and the
+    # fallen tiles are reported as what == "void".
+    g = _game()
+    st = g.init_state(_collapse_cfg(collapse_start=0, ring_interval=1, decay_ticks=1,
+                                    decay_stages=2, sight=12), _slots(1))
+    _clear_interior(st)
+    p1 = st.fighters["p1"]
+    p1.x, p1.y, p1.facing = 5, 5, 0           # centre, kept core, facing North
+    st.tick = 20                              # rings 0,1,2 along the column have fallen
+    void = g._void_at(st, st.tick - st.round_start)
+    assert {(5, 1), (5, 2), (5, 3)} <= void and (5, 4) not in void
+    cells = g.observe(st, "p1")["view"]["cells"]
+    voids = {(c["x"], c["y"]) for c in cells if c["what"] == "void"}
+    assert {(5, 1), (5, 2), (5, 3)} <= voids
+    # The border wall at (5,0) is visible THROUGH the void column (a wall there would
+    # have occluded it), proving void does not block vision.
+    assert any(c["x"] == 5 and c["y"] == 0 and c["what"] == "wall" for c in cells)
+
+
+def test_move_into_void_is_rejected():
+    g = _game()
+    st = g.init_state(_collapse_cfg(collapse_start=0, ring_interval=1, decay_ticks=1,
+                                    decay_stages=2), _slots(1))
+    _clear_interior(st)
+    p1 = st.fighters["p1"]
+    p1.x, p1.y, p1.facing, p1.move_cd = 5, 4, 0, 0   # ring 3 (kept), facing North at (5,3)
+    st.tick = 20
+    assert (5, 3) in g._void_at(st, st.tick - st.round_start)
+    assert g.validate(st, "p1", {"type": "move", "dir": "forward"}) == \
+        "blocked by a wall or another character"
+    p1.facing = 2                             # South into the kept core (5,5): allowed
+    assert g.validate(st, "p1", {"type": "move", "dir": "forward"}) is None
+
+
+def test_coarse_enemy_hp_is_reported():
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "hearts": 3, "collapse": False, "sight": 12},
+                      _slots(2))
+    st.walls = [w for w in st.walls if not (w[1] == 5 and 3 <= w[0] <= 8)]
+    p1, p2 = st.fighters["p1"], st.fighters["p2"]
+    p1.x, p1.y, p1.facing = 3, 5, 1           # facing East along the open lane
+    p2.x, p2.y = 6, 5
+
+    def enemy_hp():
+        obs = g.observe(st, "p1")["view"]
+        e = next(e for e in obs["enemies"] if e["name"] == p2.name)
+        c = next(c for c in obs["cells"] if c.get("name") == p2.name and c["what"] == "enemy")
+        assert e["hp"] == c["hp"]
+        return e["hp"]
+
+    assert enemy_hp() == "full"               # hearts == hearts_max
+    p2.hearts = 2
+    assert enemy_hp() == "wounded"
+    p2.hearts = 1
+    assert enemy_hp() == "critical"           # one heart left
+
+
+def test_collapse_match_end_conditions():
+    g = _game()
+    st = g.init_state(_collapse_cfg(), _slots(3))
+    a, b, c = st.fighters["p1"], st.fighters["p2"], st.fighters["p3"]
+    b.out, b.alive = True, False
+    c.out, c.alive = True, False
+    res = g.result(st)                        # exactly one not out -> that one wins
+    assert res is not None and res.winners == ["p1"]
+    assert res.reason == "last one standing as the arena collapsed"
+    assert res.scores[b.name] == 0
+    a.out, a.alive = True, False
+    res = g.result(st)                        # everyone fell -> no winner
+    assert res is not None and res.winners == [] and res.reason == "the arena swallowed everyone"
+
+
+def test_collapse_off_keeps_the_floor_solid():
+    g = _game()
+    st = g.init_state({"grid": 11, "collapse": False, "drop_after": 0}, _slots(2))
+    for _ in range(400):                      # well past any collapse schedule
+        g.tick(st, 0.1)
+    assert g._void_at(st, st.tick) == set()
+    assert all(not f.out for f in st.fighters.values())
+    render = g.render(st)
+    assert render["floor"]["void"] == [] and render["collapse"]["on"] is False
+
+
+def test_encode_decode_roundtrips_out_fields():
+    g = _game()
+    st = g.init_state(_collapse_cfg(), _slots(2))
+    f = st.fighters["p1"]
+    f.out, f.alive, f.fell_tick = True, False, 17
+    restored = g.decode_state(json.loads(json.dumps(g.encode_state(st))))
+    rf = restored.fighters["p1"]
+    assert rf.out is True and rf.fell_tick == 17 and rf.alive is False
+    # Defaults survive for an untouched fighter.
+    assert restored.fighters["p2"].out is False and restored.fighters["p2"].fell_tick is None
+    assert g.render(restored) == g.render(st)

@@ -4,7 +4,7 @@ catch-up, optimistic writes, and lazy finalization are all deterministic.
 """
 
 import arena.games  # noqa: F401  -- registers games
-from arena.engine import Engine
+from arena.engine import Engine, NotParticipant
 from arena.store import MemoryStore
 
 
@@ -226,6 +226,69 @@ def test_dropped_player_is_pruned_from_roster():
         eng.submit_actions(mid, "u1", [{"type": "wait"}])
     roster = {p.user_id for p in eng.get_info(mid).players}
     assert "u1" in roster and "u2" not in roster
+
+
+def test_submit_actions_returns_post_apply_view():
+    # The action call returns the same envelope as a state read, computed after the
+    # apply, so an agent needs one round trip per tick (submit + observe in one).
+    eng, now = _engine()
+    mid = _start_deathmatch(eng, score_limit=5)
+    now[0] += 0.1
+    out = eng.submit_actions(mid, "u1", [{"type": "move", "dx": 1, "dy": 0}])
+    assert out["match_id"] == mid
+    assert out["seat"]["player_id"] == "p1"
+    assert out["phase"] == "running" and out["result"] is None
+    assert "players" in out["observation"]
+
+
+def test_submit_actions_view_surfaces_this_submission_rejections():
+    # seat.rejected on the action response reflects THIS submission, not a prior tick.
+    eng, now = _engine()
+    mid = _start_deathmatch(eng, score_limit=5)
+    now[0] += 0.1
+    out = eng.submit_actions(mid, "u1", [{"type": "bogus"}])
+    assert out["seat"]["rejected"]  # the bad action is reported back immediately
+
+
+def test_finished_match_read_allows_pruned_participant():
+    # Item J: a player who joined then was pruned (a dropped client removed from the
+    # roster) can still read the FINISHED match and gets the frozen result, not a 403.
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11, "drop_after": 3, "score_to_win": 1},
+                            autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "A", None)
+    eng.join_match(mid, "u2", "B", None)
+    eng.start_match(mid)
+    # u1 keeps acting; u2 never does, so u2 is dropped from the world and pruned from
+    # the live roster, but stays recorded in participants.
+    for _ in range(8):
+        now[0] += 0.1
+        eng.submit_actions(mid, "u1", [{"type": "wait"}])
+    info = eng.get_info(mid)
+    assert "u2" not in {p.user_id for p in info.players}
+    assert "u2" in info.participants and "u1" in info.participants
+
+    # Force a finish: give u1 the score limit in the persisted state, then a read
+    # lazy-finalizes the match to finished.
+    rec, ver = eng._store.get_match_state(mid)
+    rec.state["fighters"]["p1"]["frags"] = 1
+    eng._store.put_match_state(mid, rec, ver)
+    now[0] += 0.1
+    assert eng.scene_view(mid)["phase"] == "finished"
+    assert eng.get_info(mid).phase.value == "finished"
+
+    # The pruned participant reads the finished match: no NotParticipant, result present.
+    view = eng.agent_view(mid, "u2")
+    assert view["phase"] == "finished"
+    assert view["result"]["winners"] == ["p1"]
+
+    # A genuine non-participant is still rejected, even on a finished match.
+    try:
+        eng.agent_view(mid, "u-stranger")
+        assert False, "expected a non-participant to be rejected"
+    except NotParticipant:
+        pass
 
 
 def test_lobby_shows_board_and_players_before_start():

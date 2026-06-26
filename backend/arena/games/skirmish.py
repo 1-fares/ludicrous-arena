@@ -60,6 +60,21 @@ Config (all optional):
     territory_cap:   float = 4.0   most you can earn from new ground (kills still decide)
     expose_ticks:    int = 30      ticks idle in one cell before you are exposed
     drop_after:      int = 150     ticks with no action before a dropped client is downed (0=off)
+    collapse:        bool = True   collapsing floor: the arena falls in from the outer ring each round
+    collapse_start:  int = 120     grace ticks each round before the outer ring starts cracking
+    ring_interval:   int = 70      ticks between successive rings beginning to decay
+    decay_ticks:     int = 40      ticks a tile spends visibly cracking before it falls
+    decay_stages:    int = 4       number of visible crack stages (0..decay_stages-1)
+    keep_rings:      int = 2       innermost rings that never collapse (the core)
+
+The collapsing floor (`collapse=true`) shrinks the arena each round. A floor tile's
+ring is its distance inward from the border (ring 0 is the outer edge). Outer rings
+crack then fall to the void on a fixed, deterministic schedule measured from the round
+start; the innermost `keep_rings` never fall. A void tile is a hole: not walkable,
+bullets despawn entering it, and it does not block vision (you see across it). A
+fighter caught alive on a tile when it falls is OUT, eliminated for the whole match
+with zero points and no respawn (distinct from being shot, which only downs you for
+the round). A downed (already not-alive) fighter is not made out by the collapse.
 """
 
 from __future__ import annotations
@@ -121,6 +136,18 @@ META = GameMeta(
                              "description": "Ticks of staying in one cell before you are exposed: your position is revealed to every living enemy (through walls) until you move. 0 disables it."},
             "drop_after": {"type": "integer", "default": 150, "minimum": 0, "maximum": 100000,
                            "description": "Ticks with no submitted action before a player is treated as dropped: they are downed for the round so a gone client cannot freeze the game or be farmed. 0 disables it."},
+            "collapse": {"type": "boolean", "default": True,
+                         "description": "Enable the collapsing floor: each round the arena falls in from the outer ring. A fighter caught alive on a tile when it falls is eliminated for the match (0 points). False keeps the floor solid (old behaviour)."},
+            "collapse_start": {"type": "integer", "default": 120, "minimum": 0, "maximum": 1_000_000,
+                               "description": "Grace ticks each round before the outermost ring starts to crack (timing is relative to the round start, so every round begins solid)."},
+            "ring_interval": {"type": "integer", "default": 70, "minimum": 1, "maximum": 1_000_000,
+                              "description": "Ticks between successive rings (outer to inner) beginning to decay."},
+            "decay_ticks": {"type": "integer", "default": 40, "minimum": 1, "maximum": 1_000_000,
+                            "description": "Ticks a tile spends visibly cracking before it falls into the void."},
+            "decay_stages": {"type": "integer", "default": 4, "minimum": 1, "maximum": 8,
+                             "description": "Number of visible crack stages (0..decay_stages-1) a tile passes through while decaying."},
+            "keep_rings": {"type": "integer", "default": 2, "minimum": 1, "maximum": 1000,
+                           "description": "Innermost rings that never collapse, so a solid core always remains to fight on and a round can resolve."},
         },
     },
     action_schema={
@@ -158,6 +185,9 @@ META = GameMeta(
                                      "tick": {"type": "integer", "description": "Tick the hit landed."},
                                      "dir": {"enum": ["N", "E", "S", "W"], "description": "Absolute direction the bullet was travelling."},
                                      "from": {"enum": ["ahead", "right", "behind", "left"], "description": "Bearing of the shooter relative to your facing."}}},
+                    "out": {"type": "boolean", "description": "You fell into the void: eliminated for the rest of the match (not just this round). You score 0 and do not respawn."},
+                    "out_reason": {"type": ["string", "null"], "description": "\"fell into the void\" when out, else null."},
+                    "fell_tick": {"type": ["integer", "null"], "description": "Absolute tick you fell into the void, or null if you have not fallen."},
                 },
             },
             "view": {
@@ -174,8 +204,11 @@ META = GameMeta(
                                 "right": {"type": "integer", "description": "Lateral offset; negative is to your left."},
                                 "x": {"type": "integer", "description": "Absolute grid column."},
                                 "y": {"type": "integer", "description": "Absolute grid row."},
-                                "what": {"enum": ["wall", "empty", "enemy"]},
+                                "what": {"enum": ["wall", "empty", "enemy", "void"], "description": "void is a fallen floor tile: not walkable, bullets despawn entering it, but it does not block vision (you see across the hole)."},
                                 "name": {"type": "string", "description": "Present when what == enemy."},
+                                "hp": {"enum": ["full", "wounded", "critical"], "description": "Coarse health of the enemy on this cell (present when what == enemy). full = untouched, critical = one heart left, wounded = in between."},
+                                "decay": {"type": "integer", "description": "Crack stage of this floor tile, 0 (solid) .. decay_stages-1 (about to fall). Present on empty/enemy cells; absent on wall/void."},
+                                "falls_in": {"type": ["integer", "null"], "description": "Ticks until this tile becomes void, or null if it never falls (kept core, or collapse disabled). Present on empty/enemy cells."},
                             },
                         },
                     },
@@ -190,6 +223,7 @@ META = GameMeta(
                                 "right": {"type": "integer"},
                                 "distance": {"type": "number", "description": "Cells away."},
                                 "bearing": {"enum": ["ahead", "left", "right"]},
+                                "hp": {"enum": ["full", "wounded", "critical"], "description": "Coarse health: full = untouched, critical = one heart left, wounded = in between."},
                             },
                         },
                     },
@@ -209,13 +243,27 @@ META = GameMeta(
                         "description": "Exposed enemies (idle too long), revealed to everyone regardless of walls or your cone. Hunt them.",
                         "items": {"type": "object", "properties": {
                             "name": {"type": "string"},
-                            "x": {"type": "integer"}, "y": {"type": "integer"}}},
+                            "x": {"type": "integer"}, "y": {"type": "integer"},
+                            "hp": {"enum": ["full", "wounded", "critical"], "description": "Coarse health of the exposed enemy."}}},
                     },
+                },
+            },
+            "arena": {
+                "type": "object",
+                "description": "Public state of the collapsing floor (environmental, not fog-gated). Use it to steer toward the centre before the edge falls.",
+                "properties": {
+                    "collapsing": {"type": "boolean", "description": "True if the collapsing floor is enabled (config.collapse)."},
+                    "round_elapsed": {"type": "integer", "description": "Ticks since the current round began (collapse timing is measured from here)."},
+                    "rings_total": {"type": "integer", "description": "Number of concentric floor rings, 0 (outermost) .. rings_total-1 (centre)."},
+                    "keep_rings": {"type": "integer", "description": "Innermost rings that never collapse."},
+                    "safe_ring": {"type": "integer", "description": "Outermost ring not yet fully fallen: the current edge of solid ground. Rings with a lower index than this are gone."},
+                    "next_fall_tick": {"type": ["integer", "null"], "description": "Absolute tick the next ring fully falls, or null if only the kept core remains (or collapse is disabled)."},
+                    "center": {"type": "array", "items": {"type": "integer"}, "description": "[cx, cy] arena centre cell, the safest point."},
                 },
             },
             "round": {"type": "integer"},
             "phase": {"enum": ["fighting", "intermission"]},
-            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name. Values are numbers: territory adds a fractional bonus.",
+            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name. Values are numbers: territory adds a fractional bonus. An out (fallen) fighter scores 0.",
                        "additionalProperties": {"type": "number"}},
         },
     },
@@ -241,6 +289,8 @@ class Fighter:
     visited: list = field(default_factory=list)   # [[x,y], ...] cells already scored for territory
     last_act: int = 0            # tick of the last submitted action; stale => client gone (dropped)
     last_hit: Optional[dict] = None  # most recent hit this round: {tick, dir, from}, or None
+    out: bool = False            # fell into the void: eliminated for the match, scores 0, never respawns
+    fell_tick: Optional[int] = None  # absolute tick the fighter fell, or None
 
 
 @dataclass
@@ -342,8 +392,80 @@ def _int(v: Any) -> bool:
 def _points(f: "Fighter", cfg: dict[str, Any]) -> float:
     """A player's standing: a point per elimination plus capped territory. Kills
     dominate (territory is capped below the score limit), so you cannot win by
-    pacing alone, but a mover always outranks a camper on equal kills."""
+    pacing alone, but a mover always outranks a camper on equal kills. A fighter
+    who fell into the void scores 0 for the match."""
+    if f.out:
+        return 0.0
     return f.frags + min(f.terr, cfg["territory_cap"])
+
+
+def _coarse_hp(hearts: int, hearts_max: int) -> str:
+    """Bucket exact hearts into a coarse health read (full / wounded / critical) so a
+    sighting leaks the shape of an enemy's health, not its exact value."""
+    if hearts >= hearts_max:
+        return "full"
+    if hearts <= 1:
+        return "critical"
+    return "wounded"
+
+
+def _rings(state: "State") -> tuple[dict[tuple[int, int], int], int, tuple[int, int]]:
+    """Map each walkable (non-wall) cell to its ring index: the Chebyshev distance
+    inward from the border, with ring 0 the outermost walkable ring (touching the
+    border) and the index growing toward the centre. Purely geometric and
+    deterministic. Returns (rings, rings_total, center). rings_total is computed
+    from the grid alone (independent of interior walls) so the kept core is stable."""
+    g = state.grid
+    walls = {(x, y) for x, y in state.walls}
+    rings: dict[tuple[int, int], int] = {}
+    for x in range(g):
+        for y in range(g):
+            if (x, y) in walls:
+                continue
+            r = min(x, g - 1 - x, y, g - 1 - y) - 1
+            rings[(x, y)] = max(0, r)
+    rings_total = max(0, (g - 1) // 2)
+    c = (g - 1) // 2
+    return rings, rings_total, (c, c)
+
+
+def _tile_status(cfg: dict[str, Any], ring: int, rings_total: int, e: int) -> tuple[str, int, Optional[int]]:
+    """Status of a floor tile in ``ring`` at round elapsed ``e``. Pure function of
+    (e, ring, config), nothing random or stored. Returns (phase, decay, falls_in):
+    phase is "solid" | "cracking" | "void"; decay is the visible crack stage
+    (0..decay_stages-1); falls_in is ticks until the tile becomes void, or None if
+    it never falls (kept core, or collapse disabled)."""
+    if not cfg.get("collapse", True):
+        return "solid", 0, None
+    keep_from = rings_total - cfg["keep_rings"]
+    if ring >= keep_from:
+        return "solid", 0, None          # innermost kept core: solid forever
+    begin = cfg["collapse_start"] + ring * cfg["ring_interval"]
+    fall = begin + cfg["decay_ticks"]
+    if e < begin:
+        return "solid", 0, fall - e
+    if e < fall:
+        stages = cfg["decay_stages"]
+        stage = int((e - begin) / cfg["decay_ticks"] * stages)
+        stage = max(0, min(stages - 1, stage))
+        return "cracking", stage, fall - e
+    return "void", cfg["decay_stages"] - 1, None
+
+
+def _safe_ring(cfg: dict[str, Any], rings_total: int, e: int) -> int:
+    """The outermost ring (lowest index) not yet fully fallen at elapsed ``e``: the
+    current edge of solid ground. Rings below it are void; the kept core bounds it."""
+    if not cfg.get("collapse", True):
+        return 0
+    keep_from = rings_total - cfg["keep_rings"]
+    r = 0
+    while r < keep_from:
+        fall = cfg["collapse_start"] + r * cfg["ring_interval"] + cfg["decay_ticks"]
+        if e >= fall:
+            r += 1
+        else:
+            break
+    return r
 
 
 class Skirmish:
@@ -399,12 +521,25 @@ class Skirmish:
         return {(f.x, f.y) for pid, f in state.fighters.items()
                 if f.alive and pid != exclude}
 
+    def _void_at(self, state: State, e: int) -> set[tuple[int, int]]:
+        """Set of cells that are void (fallen) at round elapsed ``e``. Derived from
+        the ring geometry and config, never stored."""
+        cfg = state.cfg
+        if not cfg.get("collapse", True):
+            return set()
+        rings, rings_total, _ = _rings(state)
+        return {cell for cell, r in rings.items()
+                if _tile_status(cfg, r, rings_total, e)[0] == "void"}
+
     def _blocked(self, state: State, cell: tuple[int, int], mover: str) -> bool:
         g = state.grid
         x, y = cell
         if not (0 <= x < g and 0 <= y < g):
             return True
-        return cell in self._wallset(state) or cell in self._occupied(state, mover)
+        if cell in self._wallset(state) or cell in self._occupied(state, mover):
+            return True
+        # A fallen tile is a hole: not walkable. Use the currently-observed elapsed.
+        return cell in self._void_at(state, state.tick - state.round_start)
 
     def _los_clear(self, state: State, ax: int, ay: int, bx: int, by: int) -> bool:
         """Line of sight between two cell centers: no wall strictly between them."""
@@ -507,6 +642,9 @@ class Skirmish:
             del state.fighters[pid]
 
         walls = self._wallset(state)
+        # Tile status for the tick we are advancing into (state.tick increments at the
+        # end), so void detection here matches what observe reports afterwards.
+        void = self._void_at(state, state.tick - state.round_start + 1)
         speed = cfg["bullet_speed"]
         alive_bullets: list[Bullet] = []
         for b in state.bullets:
@@ -514,7 +652,8 @@ class Skirmish:
             b.y += b.dy * speed * dt
             b.travelled += speed * dt
             cell = (round(b.x), round(b.y))
-            if b.travelled > cfg["fire_range"] or cell in walls:
+            # A void cell is a hole: a bullet entering it despawns, same as a wall.
+            if b.travelled > cfg["fire_range"] or cell in walls or cell in void:
                 continue
             hit = False
             for pid, f in state.fighters.items():
@@ -539,6 +678,18 @@ class Skirmish:
             if not hit:
                 alive_bullets.append(b)
         state.bullets = alive_bullets
+
+        # Falling floor: a fighter still standing (alive) on a tile that has just
+        # become void is eliminated FOR THE MATCH (out): zero points, no respawn.
+        # A downed fighter (already not alive) is lying low and is not made out by the
+        # collapse; it respawns next round as normal. fell_tick is the absolute tick
+        # the fall takes effect, which matches the post-increment state.tick.
+        if void:
+            for f in state.fighters.values():
+                if f.alive and not f.out and (f.x, f.y) in void:
+                    f.alive = False
+                    f.out = True
+                    f.fell_tick = state.tick + 1
 
         self._resolve_round(state)
         state.tick += 1
@@ -566,6 +717,8 @@ class Skirmish:
 
     def _new_round(self, state: State) -> None:
         for i, (pid, f) in enumerate(state.fighters.items()):
+            if f.out:
+                continue                                       # fell into the void: gone for the match, no respawn
             sx, sy = state.spawns[i % len(state.spawns)]
             f.x, f.y, f.facing = sx, sy, i % 4
             f.hearts = state.cfg["hearts"]
@@ -607,10 +760,16 @@ class Skirmish:
         cfg = state.cfg
         g = state.grid
         walls = self._wallset(state)
+        hearts_max = cfg["hearts"]
+        # Floor decay is geometric and time-derived. Void cells are holes: not walls,
+        # so they do not block line of sight (you see across them) and are reported as
+        # what == "void" rather than occluding the cone.
+        rings, rings_total, _ = _rings(state)
+        e = state.tick - state.round_start
         fwd = DIRS[f.facing]
         rt = DIRS[(f.facing + 1) % 4]     # the agent's right-hand direction
-        enemy_at = {(e.x, e.y): e.name for pid, e in state.fighters.items()
-                    if e is not f and e.alive}
+        enemy_at = {(en.x, en.y): en for pid, en in state.fighters.items()
+                    if en is not f and en.alive}
         cells: list[dict[str, Any]] = []
         enemies: list[dict[str, Any]] = []
         for d in range(1, cfg["sight"] + 1):
@@ -620,17 +779,25 @@ class Skirmish:
                 if not (0 <= cx < g and 0 <= cy < g):
                     continue
                 if not self._sees(walls, f.x, f.y, cx, cy):
-                    continue               # behind a wall: not visible
+                    continue               # behind a wall: not visible (void does not occlude)
                 if (cx, cy) in walls:
                     cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "wall"})
+                    continue
+                phase, decay, falls_in = _tile_status(cfg, rings.get((cx, cy), 0), rings_total, e)
+                if phase == "void":
+                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "void"})
                 elif (cx, cy) in enemy_at:
-                    name = enemy_at[(cx, cy)]
-                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "enemy", "name": name})
-                    enemies.append({"name": name, "forward": d, "right": r,
+                    en = enemy_at[(cx, cy)]
+                    hp = _coarse_hp(en.hearts, hearts_max)
+                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "enemy",
+                                  "name": en.name, "hp": hp, "decay": decay, "falls_in": falls_in})
+                    enemies.append({"name": en.name, "forward": d, "right": r,
                                     "distance": round(math.hypot(cx - f.x, cy - f.y), 2),
-                                    "bearing": "ahead" if r == 0 else ("right" if r > 0 else "left")})
+                                    "bearing": "ahead" if r == 0 else ("right" if r > 0 else "left"),
+                                    "hp": hp})
                 else:
-                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "empty"})
+                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "empty",
+                                  "decay": decay, "falls_in": falls_in})
         enemies.sort(key=lambda e: e["distance"])
         # Convenience scalars derived from the cone (the central column).
         wall_ahead, cx, cy = 0, f.x, f.y
@@ -648,7 +815,8 @@ class Skirmish:
         view = self._vision(state, f) if f.alive else {"cells": [], "enemies": [], "wall_ahead": 0, "forward_clear": False}
         # Exposed enemies are broadcast to everyone, ignoring walls and the cone, so a
         # camper cannot hide. Your own `exposed` flag warns you that you are lit up.
-        view["pinged"] = [{"name": e.name, "x": e.x, "y": e.y}
+        view["pinged"] = [{"name": e.name, "x": e.x, "y": e.y,
+                           "hp": _coarse_hp(e.hearts, cfg["hearts"])}
                           for pid, e in state.fighters.items()
                           if pid != player_id and e.alive and e.exposed]
         # In-flight bullets within sight, including from behind or beside you (not
@@ -658,6 +826,19 @@ class Skirmish:
                              "dx": round(b.dx, 2), "dy": round(b.dy, 2)}
                             for b in state.bullets
                             if math.hypot(b.x - f.x, b.y - f.y) <= sight] if f.alive else [])
+        # Public collapse summary: environmental, not fog-gated, so an agent can steer
+        # for the centre. center is the safest cell; safe_ring is the current edge.
+        _, rings_total, center = _rings(state)
+        e = state.tick - state.round_start
+        safe_ring = _safe_ring(cfg, rings_total, e)
+        collapsing = bool(cfg.get("collapse", True))
+        keep_from = rings_total - cfg["keep_rings"]
+        next_fall_tick = (state.round_start + cfg["collapse_start"]
+                          + safe_ring * cfg["ring_interval"] + cfg["decay_ticks"]) \
+            if collapsing and safe_ring < keep_from else None
+        arena = {"collapsing": collapsing, "round_elapsed": e, "rings_total": rings_total,
+                 "keep_rings": cfg["keep_rings"], "safe_ring": safe_ring,
+                 "next_fall_tick": next_fall_tick, "center": [center[0], center[1]]}
         return {
             # The move and fire cooldowns are independent: you can fire while the move
             # cooldown is active (shoot-and-scoot) and vice versa, so can_fire tracks
@@ -667,45 +848,82 @@ class Skirmish:
                     "score": round(_points(f, cfg), 2), "frags": f.frags,
                     "territory": round(f.terr, 2), "exposed": f.exposed,
                     "camp_ticks": f.idle, "expose_at": cfg["expose_ticks"],
-                    "last_hit": f.last_hit},
+                    "last_hit": f.last_hit,
+                    "out": f.out,
+                    "out_reason": "fell into the void" if f.out else None,
+                    "fell_tick": f.fell_tick},
             "view": view,
+            "arena": arena,
             "round": state.round,
             "phase": state.phase,
             "scores": {f.name: round(_points(f, cfg), 2) for f in state.fighters.values()},
         }
 
     def render(self, state: State) -> dict[str, Any]:
+        cfg = state.cfg
+        # Only the non-solid floor cells are listed; the viewer treats any cell not
+        # named here as solid. cracking carries the crack stage and countdown so the
+        # viewer can animate; void cells are fully fallen holes.
+        rings, rings_total, center = _rings(state)
+        e = state.tick - state.round_start
+        cracking: list[dict[str, Any]] = []
+        void: list[list[int]] = []
+        for (x, y), r in rings.items():
+            phase, decay, falls_in = _tile_status(cfg, r, rings_total, e)
+            if phase == "cracking":
+                cracking.append({"x": x, "y": y, "decay": decay, "falls_in": falls_in})
+            elif phase == "void":
+                void.append([x, y])
         return {
             "grid": state.grid,
             "walls": state.walls,
             "round": state.round,
             "phase": state.phase,
-            "score_to_win": state.cfg["score_to_win"],
-            "hearts_max": state.cfg["hearts"],
+            "score_to_win": cfg["score_to_win"],
+            "hearts_max": cfg["hearts"],
             "players": [
                 {"id": pid, "name": f.name, "x": f.x, "y": f.y,
                  "dx": DIRS[f.facing][0], "dy": DIRS[f.facing][1],
                  "hearts": f.hearts, "alive": f.alive, "exposed": f.exposed,
-                 "score": round(_points(f, state.cfg), 2), "frags": f.frags}
+                 "score": round(_points(f, cfg), 2), "frags": f.frags,
+                 "out": f.out, "fell_tick": f.fell_tick}
                 for pid, f in state.fighters.items()
             ],
             "bullets": [{"x": round(b.x, 2), "y": round(b.y, 2)} for b in state.bullets],
+            "floor": {"cracking": cracking, "void": void},
+            "collapse": {"on": bool(cfg.get("collapse", True)), "stages": cfg["decay_stages"],
+                         "center": [center[0], center[1]],
+                         "safe_ring": _safe_ring(cfg, rings_total, e)},
         }
 
     def result(self, state: State) -> Optional[MatchResult]:
-        scores = {f.name: round(_points(f, state.cfg), 2) for f in state.fighters.values()}
-        by_pid = {pid: _points(f, state.cfg) for pid, f in state.fighters.items()}
-        top = max(by_pid.values(), default=0.0)
+        cfg = state.cfg
+        scores = {f.name: round(_points(f, cfg), 2) for f in state.fighters.values()}
+        # Out (fallen) fighters score 0 and can never win: exclude them from every
+        # winner set.
+        elig = {pid: _points(f, cfg) for pid, f in state.fighters.items() if not f.out}
+        out_count = len(state.fighters) - len(elig)
+        # Collapse endings: once the arena has swallowed at least one fighter, the
+        # match can end by attrition to the void before any score limit is hit.
+        if out_count >= 1 and len(state.fighters) >= 2:
+            if len(elig) == 1:
+                return MatchResult(finished_tick=state.tick, winners=list(elig.keys()),
+                                   scores=scores,
+                                   reason="last one standing as the arena collapsed")
+            if len(elig) == 0:
+                return MatchResult(finished_tick=state.tick, winners=[],
+                                   scores=scores, reason="the arena swallowed everyone")
+        top = max(elig.values(), default=0.0)
         # Points (frags + capped territory) accumulate mid-round, so the game ends the
         # instant a fighter reaches the limit, regardless of phase. The climb is visible.
-        if top >= state.cfg["score_to_win"]:
+        if elig and top >= cfg["score_to_win"]:
             return MatchResult(finished_tick=state.tick,
-                               winners=[pid for pid, s in by_pid.items() if s == top],
+                               winners=[pid for pid, s in elig.items() if s == top],
                                scores=scores, reason="reached the score limit")
         # Safety cap so a stalled match cannot run forever.
-        if state.tick >= state.cfg["score_to_win"] * 6000:
+        if state.tick >= cfg["score_to_win"] * 6000:
             return MatchResult(finished_tick=state.tick,
-                               winners=[pid for pid, s in by_pid.items() if s == top],
+                               winners=[pid for pid, s in elig.items() if s == top],
                                scores=scores, reason="time cap reached")
         return None
 

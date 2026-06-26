@@ -67,6 +67,21 @@ def test_state_roundtrips_through_json():
         assert g.render(restored) == g.render(st)
 
 
+def test_skirmish_state_roundtrips_with_collapse_fields():
+    # The new per-fighter collapse fields (out, fell_tick) must survive a real JSON
+    # dump/load, like every other persisted field.
+    g = registry.get("skirmish")
+    st = g.init_state({"grid": 11, "seed": 4, "collapse": True}, _slots(2))
+    f = st.fighters["p1"]
+    f.out, f.alive, f.fell_tick = True, False, 9
+    encoded = json.loads(json.dumps(g.encode_state(st)))   # must be JSON-safe
+    restored = g.decode_state(encoded)
+    assert restored.fighters["p1"].out is True
+    assert restored.fighters["p1"].fell_tick == 9
+    assert restored.fighters["p2"].out is False and restored.fighters["p2"].fell_tick is None
+    assert g.render(restored) == g.render(st)
+
+
 def test_deathmatch_move_normalised():
     g = registry.get("deathmatch")
     st = g.init_state({"arena_size": 100, "move_speed": 10}, _slots(1) + _slots(1))
