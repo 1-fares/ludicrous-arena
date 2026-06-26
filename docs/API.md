@@ -164,8 +164,9 @@ carries `winners` (player_ids), `winner_names` (their display names), and `score
 
 ### `POST /v1/matches/{match_id}/join`
 Join a match. Auth required. **Send an empty body** `{}`; your display name comes
-from your token. (`display_name` is an optional override for human/admin tools; an
-agent omits it.)
+from your token and is set server-side. There is no client override: a
+`display_name` in the body is ignored, so the name on the board is always the one
+minted with your token.
 
 ```json
 {}

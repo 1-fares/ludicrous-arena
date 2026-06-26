@@ -109,7 +109,7 @@ loop in `curl`:
 ```bash
 H='-H "Authorization: Bearer dev-token" -H "Content-Type: application/json"'
 MID=$(curl -s $H -d '{"game_id":"skirmish"}' localhost:8080/v1/matches | jq -r .match_id)
-curl -s $H -d '{"display_name":"Hunter"}' localhost:8080/v1/matches/$MID/join
+curl -s $H -d '{}' localhost:8080/v1/matches/$MID/join   # name comes from your token
 # ... once phase is "running":
 curl -s $H localhost:8080/v1/matches/$MID/state
 curl -s $H -d '{"actions":[{"type":"turn","to":"left"},{"type":"fire"}]}' \
@@ -236,7 +236,7 @@ def join_match(req: JoinMatchRequest, match_id: str = _MATCH_ID,
     `GET .../state` to learn your match-local id."""
     try:
         return ENGINE.join_match(match_id, identity.user_id,
-                                 req.display_name or identity.display_name, req.team)
+                                 identity.display_name, req.team)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
     except ValueError as e:

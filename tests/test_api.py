@@ -92,8 +92,8 @@ def test_skirmish_full_flow(client):
     r = client.post("/v1/matches", json={"game_id": "skirmish", "config": {"grid": 9}}, headers=H1)
     assert r.status_code == 200, r.text
     mid = r.json()["match_id"]
-    client.post(f"/v1/matches/{mid}/join", json={"display_name": "A"}, headers=H1)
-    assert client.post(f"/v1/matches/{mid}/join", json={"display_name": "B"}, headers=H2).json()["phase"] == "running"
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H1)
+    assert client.post(f"/v1/matches/{mid}/join", json={}, headers=H2).json()["phase"] == "running"
 
     NOW[0] += 0.5  # skirmish is realtime; advance the wall clock
     body = client.get(f"/v1/matches/{mid}/state", headers=H1).json()
@@ -147,8 +147,8 @@ def test_reset_is_admin_only(client):
     mid = client.post("/v1/matches",
                       json={"game_id": "skirmish", "config": {"grid": 11}, "autostart": False},
                       headers=H1).json()["match_id"]
-    client.post(f"/v1/matches/{mid}/join", json={"display_name": "Echo"}, headers=H1)
-    client.post(f"/v1/matches/{mid}/join", json={"display_name": "Fox"}, headers=H2)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H2)
     client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
 
     assert client.post(f"/v1/matches/{mid}/reset").status_code == 401          # no token
@@ -197,6 +197,19 @@ def test_join_uses_token_name_when_omitted(client):
     assert any(p["display_name"] == "Dev Player 2" for p in info["players"])
 
 
+def test_join_ignores_client_supplied_name(client):
+    # The name on the board is server-side, bound to the token. A client that sends
+    # a display_name override must NOT be able to rename itself: the field was removed
+    # and is ignored, so the token name still wins.
+    mid = client.post("/v1/matches", json={"game_id": "skirmish", "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    info = client.post(f"/v1/matches/{mid}/join", json={"display_name": "Imposter"},
+                       headers=H2).json()
+    names = [p["display_name"] for p in info["players"]]
+    assert "Dev Player 2" in names
+    assert "Imposter" not in names
+
+
 def test_finished_match_state_no_403_for_pruned_participant(client):
     # Item J at the HTTP boundary: a past participant whose slot was pruned still
     # gets 200 and the frozen result on a finished match, not 403.
@@ -205,8 +218,8 @@ def test_finished_match_state_no_403_for_pruned_participant(client):
                             "config": {"grid": 11, "drop_after": 3, "rounds_to_win": 1},
                             "autostart": False},
                       headers=_admin_headers()).json()["match_id"]
-    client.post(f"/v1/matches/{mid}/join", json={"display_name": "A"}, headers=H1)
-    client.post(f"/v1/matches/{mid}/join", json={"display_name": "B"}, headers=H2)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H2)
     client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
     # H1 keeps acting; H2 never does and is pruned from the roster.
     for _ in range(8):

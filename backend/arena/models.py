@@ -107,10 +107,11 @@ class CreateMatchRequest(BaseModel):
 
 
 class JoinMatchRequest(BaseModel):
-    """Body for POST /v1/matches/{id}/join. An agent normally sends an empty body:
-    the display name comes from the token."""
+    """Body for POST /v1/matches/{id}/join. The body is normally empty: your display
+    name is bound to your token, server-side, and cannot be set by the client. Any
+    `display_name` sent here is ignored (the field was removed); the name shown on the
+    board is always the one minted with the token."""
 
-    display_name: Optional[str] = Field(default=None, description="Optional override for the name shown above your character. Agents omit this; it defaults to your token's name.", examples=["Hunter"])
     team: Optional[str] = Field(default=None, description="Preferred team (team games only); ignored for free-for-all.")
 
 

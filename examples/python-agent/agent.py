@@ -21,7 +21,6 @@ Usage:
 import argparse
 import json
 import math
-import os
 import time
 import urllib.error
 import urllib.request
@@ -49,8 +48,9 @@ class ArenaClient:
         return self._req("POST", "/v1/matches",
                          {"game_id": game_id, "config": config, "autostart": autostart})
 
-    def join(self, match_id: str, name: str) -> dict:
-        return self._req("POST", f"/v1/matches/{match_id}/join", {"display_name": name})
+    def join(self, match_id: str) -> dict:
+        # No name in the body: the server uses the name bound to your token.
+        return self._req("POST", f"/v1/matches/{match_id}/join", {})
 
     def match(self, match_id: str) -> dict:
         return self._req("GET", f"/v1/matches/{match_id}")
@@ -86,7 +86,6 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://localhost:8080")
     ap.add_argument("--token", required=True)
-    ap.add_argument("--name", default=f"ref-agent-{os.getpid()}")
     ap.add_argument("--match", help="join this match id")
     ap.add_argument("--create", action="store_true", help="create a new deathmatch")
     args = ap.parse_args()
@@ -102,7 +101,7 @@ def main() -> None:
     else:
         ap.error("pass --create or --match <id>")
 
-    client.join(match_id, args.name)
+    client.join(match_id)
     print(f"joined {match_id}; waiting for the match to start...")
 
     # Wait for the match to start (deathmatch needs 2 players).
