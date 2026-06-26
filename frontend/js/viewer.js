@@ -186,6 +186,70 @@ function crackCanvasTexture(stage, stages) {
   return tex;
 }
 
+// ---- sound effects (WebAudio, synthesized, no asset files) ----------------
+// Short blips cued off the polled scene: shoot, hit, crack, drop (a tile or fighter
+// falling), and death. The AudioContext can only start after a user gesture (browser
+// autoplay policy), so it is created lazily and resumed on the first pointer/key event;
+// spectators drag to rotate, which unlocks it. A HUD button toggles it.
+const Sound = (() => {
+  let ctx = null, master = null;
+  let enabled = localStorage.getItem("arena_sound") !== "off";
+  function ensure() {
+    if (!ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain(); master.gain.value = 0.22; master.connect(ctx.destination);
+    }
+    if (ctx.state === "suspended") ctx.resume();
+    return ctx;
+  }
+  ["pointerdown", "keydown"].forEach(ev =>
+    window.addEventListener(ev, () => { if (enabled) ensure(); }, { passive: true }));
+  function tone({ type = "square", f0, f1, dur = 0.12, gain = 0.6, attack = 0.005 }) {
+    if (!enabled) return;
+    const c = ensure(); if (!c || c.state !== "running") return;
+    const t = c.currentTime;
+    const o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(gain, t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t + dur + 0.03);
+  }
+  function noise({ dur = 0.12, gain = 0.4, hp = 1000 }) {
+    if (!enabled) return;
+    const c = ensure(); if (!c || c.state !== "running") return;
+    const t = c.currentTime, len = Math.max(1, Math.floor(c.sampleRate * dur));
+    const buf = c.createBuffer(1, len, c.sampleRate), data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = c.createBufferSource(); src.buffer = buf;
+    const f = c.createBiquadFilter(); f.type = "highpass"; f.frequency.value = hp;
+    const g = c.createGain(); g.gain.value = gain;
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start(t);
+  }
+  return {
+    isEnabled() { return enabled; },
+    setEnabled(v) { enabled = v; localStorage.setItem("arena_sound", v ? "on" : "off"); if (v) ensure(); },
+    shoot() { tone({ type: "square",   f0: 900, f1: 240, dur: 0.08, gain: 0.40 }); },
+    hit()   { tone({ type: "sawtooth", f0: 340, f1: 130, dur: 0.12, gain: 0.50 }); },
+    crack() { noise({ dur: 0.13, gain: 0.30, hp: 1400 }); },
+    drop()  { tone({ type: "sine",     f0: 320, f1: 55,  dur: 0.45, gain: 0.45 }); },
+    death() { tone({ type: "triangle", f0: 220, f1: 40,  dur: 0.6,  gain: 0.55 }); },
+  };
+})();
+
+(function setupSoundToggle() {
+  const btn = document.getElementById("sound");
+  if (!btn) return;
+  const paint = () => { btn.textContent = Sound.isEnabled() ? "\u{1F50A}" : "\u{1F507}"; };
+  paint();
+  btn.addEventListener("click", () => { Sound.setEnabled(!Sound.isEnabled()); paint(); });
+})();
+
 // ---- per-game renderers ---------------------------------------------------
 const RENDERERS = {
   skirmish: makeSkirmishRenderer(),
@@ -198,6 +262,8 @@ function makeSkirmishRenderer() {
   const fighters = new Map();   // id -> { group, label, target, heading, dead, out, falling, fallen, vy, hp, hitFlash }
   const shots = new Map();      // index -> { mesh, target }
   let prevBullets = [];         // last poll's bullet positions, to spot newly-fired shots
+  let prevCracking = new Set(); // last poll's cracking cells, to cue a crack sound on new ones
+  let prevVoid = new Set();     // last poll's fallen cells, to cue a drop sound on new ones
   let tAcc = 0;                 // accumulated time, for beacon bob/pulse and crack pulse
   let floor = null, wallGroup = null, builtGrid = -1;
   // Collapsing floor: the board is built from per-cell tiles so individual cells can
@@ -396,6 +462,7 @@ function makeSkirmishRenderer() {
   return {
     reset() {
       fighters.clear(); shots.clear(); fx.length = 0; prevBullets = []; tAcc = 0;
+      prevCracking = new Set(); prevVoid = new Set();
       disposeFloorExtras(); tiles.clear(); walls.clear();
       floor = null; wallGroup = null; builtGrid = -1;
       tileGeo = null; solidMat = null; wallGeo = null; wallSolidMat = null; curStages = 1;
@@ -436,6 +503,7 @@ function makeSkirmishRenderer() {
           rec.hitFlash = 1;
           const lethal = !p.alive;
           spawnRing(p.x, p.y, 0xff2b2b, lethal ? 0.6 : 0.42, 0.3, lethal ? 2.1 : 1.4, 0.09);
+          if (lethal) Sound.death(); else Sound.hit();
         }
         rec.hp = p.hearts;
         rec.target.set(p.x, 0, p.y);
@@ -448,6 +516,7 @@ function makeSkirmishRenderer() {
           // winner banner is held (see poll()) until in-flight drops complete.
           rec.falling = true; rec.vy = 0;
           spawnRing(p.x, p.y, 0x7a3ce0, 0.7, 0.3, 2.0, 0.1);   // dark burst marks the elimination
+          Sound.drop();                                        // a fighter dropped into the void
         }
         if (!rec.out && (rec.falling || rec.fallen)) {  // respawned / new round: lift back in
           rec.falling = false; rec.fallen = false; rec.vy = 0;
@@ -485,11 +554,31 @@ function makeSkirmishRenderer() {
 
       // A bullet with no near match in last poll's set was just fired: muzzle blast
       // at the gun. (Between polls a live bullet moves < 1 cell, so it self-matches.)
+      let fired = 0;
       d.bullets.forEach(b => {
-        if (!prevBullets.some(pb => Math.hypot(pb.x - b.x, pb.y - b.y) < 1.6))
-          spawnRing(b.x, b.y, 0xffcf6a, 0.34, 0.25, 1.25, 0.6);
+        if (!prevBullets.some(pb => Math.hypot(pb.x - b.x, pb.y - b.y) < 1.6)) {
+          spawnRing(b.x, b.y, 0xffcf6a, 0.34, 0.25, 1.25, 0.6); fired++;
+        }
       });
+      if (fired) Sound.shoot();
       prevBullets = d.bullets.map(b => ({ x: b.x, y: b.y }));
+
+      // Floor audio: a crack sound when a tile newly starts breaking, a drop sound when a
+      // tile newly falls. One cue per poll (the set may gain several at once between polls)
+      // so the collapse reads as discrete events, not a drone. Sets reset each round.
+      const crackNow = new Set();
+      (d.floor?.cracking || []).forEach(c => crackNow.add(`${c.x},${c.y}`));
+      (d.walls_cracking || []).forEach(c => crackNow.add(`${c.x},${c.y}`));
+      let newCrack = false;
+      for (const k of crackNow) if (!prevCracking.has(k)) { newCrack = true; break; }
+      if (newCrack) Sound.crack();
+      prevCracking = crackNow;
+
+      const voidNow = new Set((d.floor?.void || []).map(([x, y]) => `${x},${y}`));
+      let newVoid = false;
+      for (const k of voidNow) if (!prevVoid.has(k)) { newVoid = true; break; }
+      if (newVoid) Sound.drop();
+      prevVoid = voidNow;
 
       const round = d.match?.round ?? d.round ?? 0;
       const roundsToWin = d.match?.rounds_to_win ?? d.score_to_win ?? 0;
@@ -500,7 +589,7 @@ function makeSkirmishRenderer() {
         score: p.score, frags: p.frags, hearts: p.hearts, max: d.hearts_max,
         alive: p.alive, exposed: p.exposed, out: p.out,
       })), round, roundsToWin);
-      statusExtra = `round ${round} · first to ${roundsToWin}`;
+      statusExtra = roundsToWin ? `round ${round} · first to ${roundsToWin}` : `round ${round} · endless`;
     },
     lerp(dt) {
       const d = dt || 0.016;
@@ -808,7 +897,8 @@ function renderSkirmishBoard(players, round, roundsToWin) {
     roundLine = `<div class="muted">Final standings${roundsToWin ? ` (first to ${esc(roundsToWin)} round wins)` : ""}</div>`;
   } else {
     subtitle = roundsToWin
-      ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>` : "";
+      ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>`
+      : `<div class="sb-sub">Endless &middot; bouts run until an admin resets</div>`;
     roundLine = round >= 1
       ? `<div class="muted">Round ${esc(round)} in progress</div>`
       : `<div class="muted">Match not started</div>`;
@@ -819,11 +909,14 @@ function renderSkirmishBoard(players, round, roundsToWin) {
   // obvious. A large target drops the bar for a plain count to keep the panel from overflowing.
   const ranked = players.slice().sort((a, b) => (b.wins - a.wins) || (b.score - a.score));
   const bigTarget = roundsToWin > 15;
+  const endless = !roundsToWin;            // 0 = endless: a running tally, no target bar
   const progRows = ranked.map(p => {
     const wins = `<span class="winnum">${esc(p.wins)}</span>`;
-    const tail = bigTarget
-      ? `<span class="winnum">/${esc(roundsToWin)}</span>`
-      : `<span class="bar" title="${esc(p.wins)} of ${esc(roundsToWin)} round wins">${winSegs(p.wins, roundsToWin)}</span>`;
+    const tail = endless
+      ? `<span class="winnum muted">won</span>`
+      : bigTarget
+        ? `<span class="winnum">/${esc(roundsToWin)}</span>`
+        : `<span class="bar" title="${esc(p.wins)} of ${esc(roundsToWin)} round wins">${winSegs(p.wins, roundsToWin)}</span>`;
     return `<div class="prow"><span class="who"><span class="dot" style="background:${hex(p.color)}"></span>${esc(p.name)}</span>${wins}${tail}</div>`;
   }).join("");
 
@@ -903,14 +996,15 @@ function setBanner(html) {
 // A placeholder skirmish board for the lobby, so the arena is up and circling and
 // players visibly gather in it as they join (real positions appear once it starts).
 function lobbyScene(info) {
-  const g = 13, walls = [];
+  const g = info?.config?.grid || 20, walls = [];   // match the real arena size set on the match
   for (let i = 0; i < g; i++) walls.push([i, 0], [i, g - 1], [0, i], [g - 1, i]);
   const n = Math.max(1, info.players.length);
+  const ring = Math.max(3, Math.round(g / 4));
   const players = info.players.map((p, i) => {
     const a = (i / n) * Math.PI * 2;
     return {
       id: p.player_id, name: p.display_name,
-      x: Math.round(g / 2 + Math.cos(a) * 3), y: Math.round(g / 2 + Math.sin(a) * 3),
+      x: Math.round(g / 2 + Math.cos(a) * ring), y: Math.round(g / 2 + Math.sin(a) * ring),
       dx: 0, dy: 1, hearts: 3, alive: true, exposed: false, score: 0, frags: 0,
     };
   });
@@ -1056,8 +1150,9 @@ setInterval(resolveArena, 2500);
 
 // ---- admin controls (revealed by an admin token) -------------------------
 function updateAdminControls(info) {
-  const startBtn = document.getElementById("start");   // start only makes sense in a lobby
-  if (startBtn) startBtn.hidden = !(adminToken && info && info.phase === "lobby");
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.hidden = !on; };
+  show("start", !!(adminToken && info && info.phase === "lobby"));   // start only in a lobby
+  show("enddraw", !!(adminToken && info && info.phase === "running")); // draw only while running
 }
 
 async function adminCall(method, path, body) {
@@ -1084,39 +1179,23 @@ async function adminCall(method, path, body) {
   const bar = document.getElementById("adminbar");
   if (!adminToken || !bar) return;
   bar.hidden = false;
-  const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
-  on("create", async () => {
-    const r = await adminCall("POST", "/v1/matches", { game_id: "skirmish", autostart: false });
-    if (r.ok) {
-      const m = await r.json();
-      connect(m.match_id, m.game_id);        // become the arena immediately
-      statusEl.textContent = "arena created; waiting for players";
-    }
-  });
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
   on("start", async () => {
     if (!currentMatch) return;
     const r = await adminCall("POST", `/v1/matches/${currentMatch}/start`);
     statusEl.textContent = r.ok ? "started" : `start failed (${r.status})`;
   });
+  on("enddraw", async () => {
+    if (!currentMatch) return;
+    const r = await adminCall("POST", `/v1/matches/${currentMatch}/end_round`);
+    statusEl.textContent = r.ok ? "bout ended (draw); next bout starting"
+                                : `end failed (${r.status})`;
+  });
   on("reset", async () => {
-    if (currentMatch && confirm("Reset this match to round 1 for all players?")) {
+    if (currentMatch && confirm("Reset this match to round 1 for all players? Scores are wiped.")) {
       const r = await adminCall("POST", `/v1/matches/${currentMatch}/reset`);
       if (r.ok) connect(currentMatch, currentGame);
     }
-  });
-  on("brk", async () => {
-    if (!currentMatch) return;
-    const mins = parseFloat(prompt("Break length in minutes?", "5") || "0");
-    if (mins > 0) {
-      await adminCall("POST", `/v1/matches/${currentMatch}/break`,
-        { minutes: mins, note: prompt("Note for agents (optional)?", "") || null });
-      statusEl.textContent = `break: ${mins} min`;
-    }
-  });
-  on("clear", async () => {
-    const ms = await (await fetch(`${API}/v1/matches?phase=finished`)).json();
-    for (const m of ms) await adminCall("DELETE", `/v1/matches/${m.match_id}`);
-    statusEl.textContent = `cleared ${ms.length} finished`; resolveArena();
   });
 })();
 
