@@ -797,12 +797,22 @@ function renderSkirmishBoard(players, round, roundsToWin) {
   if (sbTitle) sbTitle.textContent = "STANDINGS";
 
   // Header: state the win condition and the current round. Never pair the round number
-  // and the target as a single comparable "N / M" (that reads as a contradiction).
-  const subtitle = roundsToWin
-    ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>` : "";
-  const roundLine = round >= 1
-    ? `<div class="muted">Round ${esc(round)} in progress</div>`
-    : `<div class="muted">Match not started</div>`;
+  // and the target as a single comparable "N / M" (that reads as a contradiction). Once
+  // the match is over, say so plainly and name the winner instead of "in progress".
+  let subtitle, roundLine;
+  if (boardFinished) {
+    const who = boardWinners.length ? boardWinners.join(", ") : null;
+    subtitle = who
+      ? `<div class="sb-sub"><b>${esc(who)}</b> ${boardWinners.length > 1 ? "win" : "wins"} the match</div>`
+      : `<div class="sb-sub">Match over</div>`;
+    roundLine = `<div class="muted">Final standings${roundsToWin ? ` (first to ${esc(roundsToWin)} round wins)` : ""}</div>`;
+  } else {
+    subtitle = roundsToWin
+      ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>` : "";
+    roundLine = round >= 1
+      ? `<div class="muted">Round ${esc(round)} in progress</div>`
+      : `<div class="muted">Match not started</div>`;
+  }
 
   // Match progress: a row per player, sorted by round wins then this-round score, each with
   // a bar of exactly rounds-to-win segments (filled = wins) so closeness to the target is
@@ -871,6 +881,9 @@ function toast(msg, leave) {
 // connect() drives the high-frequency scene poll for whichever match that is.
 let pollTimer = null, activeGame = null, statusExtra = "";
 let currentMatch = null, currentGame = null, adminToken = null;
+// Whether the match being rendered is over, and who won, so the scoreboard header
+// reads "Final standings / <winner> wins" instead of "Round N in progress".
+let boardFinished = false, boardWinners = [];
 const gameMeta = {};   // game_id -> {min, title}
 
 function titleFor(g) { return gameMeta[g]?.title || (g ? g[0].toUpperCase() + g.slice(1) : "-"); }
@@ -943,6 +956,7 @@ function connect(matchId, gameId) {
       // (the real board + characters once the server has it), the count in the
       // status. Never a blank board.
       if (info.phase === "lobby" || !frame.scene) {
+        boardFinished = false; boardWinners = [];
         const min = gameMeta[gameId]?.min ?? 2;
         const need = info.players.length >= min ? "ready to start" : `waiting for ${min - info.players.length} more`;
         if (frame.scene) { r.update(frame.scene); setBanner(null); }              // real maze + players
@@ -951,6 +965,16 @@ function connect(matchId, gameId) {
         statusEl.textContent = `${titleFor(gameId)} · Lobby · ${info.players.length}/${info.max_players} joined · ${need}`;
         return;
       }
+      // Tell the scoreboard whether this is the final, settled state and who won, so its
+      // header reads "Final standings / <winner> wins" rather than "Round N in progress".
+      const players0 = frame.scene?.players || [];
+      const nameOf0 = (id) => players0.find(p => p.id === id)?.name || id;
+      boardFinished = info.phase === "finished";
+      boardWinners = boardFinished
+        ? ((frame.result?.winner_names && frame.result.winner_names.length)
+            ? frame.result.winner_names
+            : (frame.result?.winners || []).map(nameOf0))
+        : [];
       if (frame.scene) r.update(frame.scene);
       if (info.phase === "finished") {
         if (!finishedAt) finishedAt = Date.now();

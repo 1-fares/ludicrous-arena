@@ -333,7 +333,7 @@ class Engine:
             raise NotParticipant("not a participant in this match")
         if state is None or info.phase == MatchPhase.lobby:
             raise ValueError("match has not started")
-        self._lazy_finalize(match_id, result, tick)
+        self._lazy_finalize(match_id, result, tick, game, state)
         return {
             "match_id": match_id,
             "tick": tick,
@@ -352,7 +352,7 @@ class Engine:
         game, info, state, tick, result, _, _ = self._project(match_id)
         if state is None:
             return {"match_id": match_id, "tick": 0, "phase": info.phase.value, "scene": None}
-        self._lazy_finalize(match_id, result, tick)
+        self._lazy_finalize(match_id, result, tick, game, state)
         return {
             "match_id": match_id,
             "tick": tick,
@@ -461,11 +461,18 @@ class Engine:
 
     # -- helpers -----------------------------------------------------------
 
-    def _lazy_finalize(self, match_id: str, result: Optional[MatchResult], tick: int) -> None:
+    def _lazy_finalize(self, match_id: str, result: Optional[MatchResult], tick: int,
+                       game: Optional[Game] = None, state: Any = None) -> None:
         """Persist the terminal record the first time anyone observes the end.
         Best-effort: a lost version race just means another caller finalized.
         ``result`` is deterministic (first tick the win condition holds), so the
-        first writer records the canonical outcome."""
+        first writer records the canonical outcome.
+
+        When the end is reached by a read projecting forward (reads do not persist
+        state), pass ``game`` and the projected final ``state`` so the finishing
+        world is written too. Otherwise the freeze branch in ``_project`` would keep
+        returning the last state an action persisted, which is behind the finish the
+        projection reached (e.g. the winning round-win not yet reflected)."""
         if result is None:
             return
         loaded = self._store.get_match_meta(match_id)
@@ -474,6 +481,18 @@ class Engine:
         meta = MatchInfo.model_validate(loaded[0])
         if meta.phase == MatchPhase.finished:
             return
+        # Persist the projected final state before flipping the phase, so a frozen
+        # read never sees finished-but-stale. Best-effort under the version check.
+        if game is not None and state is not None:
+            loaded_state = self._store.get_match_state(match_id)
+            if loaded_state is not None:
+                rec_s, ver_s = loaded_state
+                try:
+                    self._store.put_match_state(match_id, StateRecord(
+                        state=game.encode_state(state), last_tick=tick,
+                        last_wall_ms=rec_s.last_wall_ms, rejected=rec_s.rejected), ver_s)
+                except Conflict:
+                    pass
         # Fill in the winners' display names from the roster so a client can map a
         # winning player_id to a name without a second lookup. Mutating in place also
         # gives the calling read/action the enriched result for its own response.

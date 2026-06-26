@@ -70,6 +70,10 @@ def test_kill_scores_and_finishes():
     assert eng.scene_view(mid)["result"]["winners"] == info.result.winners
     assert eng.agent_view(mid, "u1")["result"]["winners"] == info.result.winners
     assert eng.scene_view(mid)["tick"] == info.tick  # frozen, not re-projected
+    # Regression: the win was reached by a read projecting forward (the kill happened
+    # after the last action persisted state). The finishing scene must be persisted at
+    # finalize, so a later frozen read shows that final world, not the pre-kill state.
+    assert eng.scene_view(mid)["scene"] == scene["scene"]
     try:
         eng.submit_actions(mid, "u2", [{"type": "move", "dx": 1, "dy": 0}])
         assert False, "expected finished match to reject actions"
