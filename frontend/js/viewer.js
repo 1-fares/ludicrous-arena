@@ -892,15 +892,15 @@ function renderSkirmishBoard(players, round, roundsToWin) {
   if (boardFinished) {
     const who = boardWinners.length ? boardWinners.join(", ") : null;
     subtitle = who
-      ? `<div class="sb-sub"><b>${esc(who)}</b> ${boardWinners.length > 1 ? "win" : "wins"} the match</div>`
+      ? `<div class="sb-sub"><b>${esc(who)}</b> ${boardWinners.length > 1 ? "win" : "wins"}</div>`
       : `<div class="sb-sub">Match over</div>`;
-    roundLine = `<div class="muted">Final standings${roundsToWin ? ` (first to ${esc(roundsToWin)} round wins)` : ""}</div>`;
+    roundLine = `<div class="muted">Final standings</div>`;
   } else {
     subtitle = roundsToWin
-      ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b> round wins takes the match</div>`
-      : `<div class="sb-sub">Endless &middot; bouts run until an admin resets</div>`;
+      ? `<div class="sb-sub">First to <b>${esc(roundsToWin)}</b></div>`
+      : `<div class="sb-sub">Endless</div>`;
     roundLine = round >= 1
-      ? `<div class="muted">Round ${esc(round)} in progress</div>`
+      ? `<div class="muted">Round ${esc(round)}</div>`
       : `<div class="muted">Match not started</div>`;
   }
 
@@ -926,11 +926,8 @@ function renderSkirmishBoard(players, round, roundsToWin) {
 
   scoresEl.innerHTML =
     subtitle + roundLine +
-    `<div class="section">Rounds won${roundsToWin ? ` (first to ${esc(roundsToWin)})` : ""}</div>` + progRows +
-    `<div class="section">This round</div>` +
-    `<div class="legend">score = frags + new ground</div>` + roundRows +
-    `<div class="foot">down = shot, respawns next round. fell = stepped off a collapsing tile too` +
-    ` late, out this round. revealed = stood still too long, visible to all.</div>`;
+    `<div class="section">Rounds won</div>` + progRows +
+    `<div class="section">This round</div>` + roundRows;
 }
 
 // rounds-to-win segments for the progress bar: the first `wins` filled, the remainder empty.
@@ -943,19 +940,18 @@ function winSegs(wins, target) {
 // One this-round row: plain-word state (never the bare "OUT"/"EXPOSED" caps) and the score.
 function thisRoundRow(p) {
   const dot = `<span class="dot" style="background:${hex(p.color)}"></span>`;
-  let main, hint = "", gone = false;
+  let main, gone = false;
   if (p.out) {                         // fell into the void: out for the rest of this round
-    main = `<span class="state fell">fell</span>`; hint = "out this round"; gone = true;
+    main = `<span class="state fell">fell</span>`; gone = true;
   } else if (!p.alive) {               // shot down: respawns at the next round
-    main = `<span class="state down">down</span>`; hint = "back next round"; gone = true;
+    main = `<span class="state down">down</span>`; gone = true;
   } else {                             // alive: hearts, plus a "revealed" tag if exposed
     const hearts = "♥".repeat(Math.max(0, p.hearts)) + "♡".repeat(Math.max(0, p.max - p.hearts));
     main = `<span class="hearts">${hearts}</span>` + (p.exposed ? `<span class="tag">revealed</span>` : "");
   }
   const who = `<span class="who${gone ? " gone" : ""}">${dot}${esc(p.name)}</span>`;
   const end = `<span class="tend">${main}<b>${esc(p.score)}</b></span>`;
-  const hintLine = hint ? `<div class="thint">${esc(hint)}</div>` : "";
-  return `<div class="trow">${who}${end}</div>${hintLine}`;
+  return `<div class="trow">${who}${end}</div>`;
 }
 
 // ---- toasts (players joining / dropping) ---------------------------------

@@ -58,9 +58,18 @@
     #scoreboard .state { font-weight: 700; }
     #scoreboard .state.down { color: #7c89a3; }
     #scoreboard .state.fell { color: #b07cff; }
-    #scoreboard .thint { font-size: 10px; color: #56607a; padding-left: 15px; margin: 0 0 2px; }
-    #scoreboard .foot { font-size: 10px; color: #56607a; line-height: 1.35; margin-top: 9px;
-           border-top: 1px solid #1c2538; padding-top: 7px; }
+    /* Compact layout on phones: the board was eating half the screen. */
+    @media (max-width: 600px) {
+      #scoreboard { top: 40px; right: 7px; min-width: 0; max-width: 47vw; padding: 6px 8px;
+             max-height: 60vh; overflow-y: auto; border-radius: 6px; }
+      #scoreboard h3 { font-size: 10px; margin-bottom: 4px; }
+      #scoreboard .sb-sub, #scoreboard .muted, #scoreboard .section,
+      #scoreboard .row, #scoreboard .prow, #scoreboard .trow { font-size: 10px; }
+      #scoreboard .section { margin: 6px 0 3px; padding-top: 5px; }
+      #scoreboard .bar i { width: 6px; height: 9px; }
+      #scoreboard .tag { font-size: 9px; padding: 0 4px; }
+      #hint { display: none; }
+    }
     #hint { position: fixed; left: 14px; bottom: 12px; color: #56607a;
             font-size: 12px; background: #0b0e14aa; border: 1px solid #1c2538;
             border-radius: 6px; padding: 5px 9px; pointer-events: none; }
