@@ -7,6 +7,9 @@
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
+    /* An id rule like #adminbar{display:inline-flex} outranks the UA [hidden]{display:none},
+       which would leak the admin controls to spectators. Force hidden to win everywhere. */
+    [hidden] { display: none !important; }
     body { margin: 0; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
            background: #07090d; color: #cdd6e4; overflow: hidden; }
     #scene { position: fixed; inset: 0; }
@@ -104,6 +107,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=21"></script>
+  <script type="module" src="./js/viewer.js?v=22"></script>
 </body>
 </html>
