@@ -254,7 +254,7 @@ def test_finished_match_read_allows_pruned_participant():
     # Item J: a player who joined then was pruned (a dropped client removed from the
     # roster) can still read the FINISHED match and gets the frozen result, not a 403.
     eng, now = _engine()
-    info = eng.create_match("skirmish", {"grid": 11, "drop_after": 3, "score_to_win": 1},
+    info = eng.create_match("skirmish", {"grid": 11, "drop_after": 3, "rounds_to_win": 1},
                             autostart=False)
     mid = info.match_id
     eng.join_match(mid, "u1", "A", None)
@@ -269,10 +269,10 @@ def test_finished_match_read_allows_pruned_participant():
     assert "u2" not in {p.user_id for p in info.players}
     assert "u2" in info.participants and "u1" in info.participants
 
-    # Force a finish: give u1 the score limit in the persisted state, then a read
+    # Force a finish: give u1 the round-win limit in the persisted state, then a read
     # lazy-finalizes the match to finished.
     rec, ver = eng._store.get_match_state(mid)
-    rec.state["fighters"]["p1"]["frags"] = 1
+    rec.state["fighters"]["p1"]["round_wins"] = 1
     eng._store.put_match_state(mid, rec, ver)
     now[0] += 0.1
     assert eng.scene_view(mid)["phase"] == "finished"

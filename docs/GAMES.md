@@ -10,8 +10,9 @@ Characters live on a grid of open cells and walls. Each occupies a cell and face
 one of four directions. You move a cell at a time, turn in 90-degree steps, and can
 only *see* forward through a narrow cone, so walls are cover and positioning is
 everything. Three hits and you are down, lying on the floor until the next round.
-Every elimination scores a point, and first to the score limit takes the game, so
-the way to win is to hunt: points come from kills, not from outlasting the others.
+A round goes to the last fighter standing; the **match** goes to the first to
+`rounds_to_win` round-wins. Eliminations score frags (the scoreboard and the
+round-win tiebreak) but no longer decide the match on their own.
 Two incentives keep you moving rather than camping: standing in one cell too long
 **exposes** you (your position is broadcast to every enemy, through walls, until you
 move), and each **new cell** you enter earns a sliver of score (capped, so kills
@@ -22,14 +23,18 @@ Real-time (`realtime=true`): the world runs on the wall clock, and per-character
 cooldowns gate how often you move or fire (one shot per second).
 
 - **Players**: 2-8, free-for-all. **Tick rate**: 10 Hz.
-- **Config**: `grid` (13), `seed` (1), `wall_density` (0.16), `score_to_win` (10),
-  `hearts` (3), `fire_range` (4), `fire_cooldown` (10 ticks = 1s), `move_cooldown`
-  (3 ticks), `bullet_speed` (6 cells/s), `sight` (12), `intermission` (20 ticks),
-  `round_limit` (0 = off; a round ends only on last-standing/all-dead. If set >0, a
-  stalled round is force-reset after that many ticks, awarding nothing), `cell_bonus`
-  (0.05, score per new cell entered), `territory_cap` (4.0, most you can earn from new
-  ground), `expose_ticks` (30, ticks idle in one cell before you are exposed),
-  `collapse` (true, the collapsing floor), `collapse_start` (120, grace ticks each
+- **Config**: `grid` (13), `seed` (1), `wall_density` (0.16), `rounds_to_win` (10,
+  round-wins to take the match), `score_to_win` (10, scoreboard target only; it no
+  longer ends the match), `hearts` (3), `fire_range` (4), `fire_cooldown` (10 ticks =
+  1s), `move_cooldown` (3 ticks), `bullet_speed` (6 cells/s), `sight` (12),
+  `intermission` (20 ticks), `round_limit` (0 = off; a round ends only on
+  last-standing/all-dead. If set >0, a stalled round is force-reset after that many
+  ticks, awarding no round-win), `drop_after` (0 = off by default: a present player is
+  never evicted for inactivity. If set >0, a client that submits nothing for that many
+  ticks is evicted), `cell_bonus` (0.05, score per new cell entered), `territory_cap`
+  (4.0, most you can earn from new ground), `expose_ticks` (30, ticks idle in one cell
+  before you are exposed), `collapse` (true, the collapsing floor), `collapse_start`
+  (120, grace ticks each
   round before the outer ring cracks), `ring_interval` (70, ticks between successive
   rings starting to decay), `decay_ticks` (40, ticks a tile cracks before it falls),
   `decay_stages` (4, visible crack stages), `keep_rings` (2, innermost rings that never
@@ -51,11 +56,11 @@ cooldowns gate how often you move or fire (one shot per second).
             "score": 1.35, "frags": 1, "territory": 0.35, "exposed": false,
             "camp_ticks": 4, "expose_at": 30,
             "last_hit": {"tick": 39, "dir": "W", "from": "behind"},
-            "out": false, "out_reason": null, "fell_tick": null},
+            "out": false, "out_reason": null, "fell_tick": null, "round_wins": 3},
     "view": {
       "cells": [
         {"forward": 1, "right": 0, "x": 4, "y": 5, "what": "empty", "decay": 0, "falls_in": 90},
-        {"forward": 1, "right": 1, "x": 4, "y": 6, "what": "wall"},
+        {"forward": 1, "right": 1, "x": 4, "y": 6, "what": "wall", "decay": 0, "falls_in": null},
         {"forward": 1, "right": -1, "x": 4, "y": 4, "what": "void"},
         {"forward": 2, "right": 0, "x": 5, "y": 5, "what": "enemy", "name": "Vega",
          "hp": "wounded", "decay": 2, "falls_in": 20}
@@ -67,7 +72,9 @@ cooldowns gate how often you move or fire (one shot per second).
     },
     "arena": {"collapsing": true, "round_elapsed": 130, "rings_total": 6, "keep_rings": 2,
               "safe_ring": 0, "next_fall_tick": 160, "center": [6, 6]},
-    "round": 2, "phase": "fighting", "scores": {"Hunter": 1.35, "Vega": 0.2}
+    "round": 7, "phase": "fighting",
+    "match": {"round": 7, "rounds_to_win": 10, "round_wins": {"Hunter": 3, "Vega": 3}},
+    "scores": {"Hunter": 1.35, "Vega": 0.2}
   }
   ```
   You see an **expanding cone** ahead: at forward distance `d` you see the row of
@@ -95,37 +102,47 @@ cooldowns gate how often you move or fire (one shot per second).
     (`ahead`/`right`/`behind`/`left`). React to it.
   - `can_move` and `can_fire` are **independent** cooldowns: you may fire while the
     move cooldown is active (shoot-and-scoot) and move while the gun reloads.
-  - **`cells[].decay` / `cells[].falls_in`** describe the collapsing floor (see below).
-    `decay` is the crack stage of a floor tile (0 solid .. `decay_stages-1` about to
-    fall); `falls_in` is ticks until it becomes void, or `null` if it never falls.
-    Both are present on `empty` and `enemy` cells; `wall` and `void` cells omit them.
+  - **`cells[].decay` / `cells[].falls_in`** describe the collapsing arena (see below).
+    `decay` is the crack stage of a cell (0 solid .. `decay_stages-1` about to fall);
+    `falls_in` is ticks until it becomes void, or `null` if it never falls. Walls fall
+    on the same ring schedule as the floor, so both are present on `empty`, `enemy`,
+    and `wall` cells; `void` cells (already fallen) omit them.
   - **`cells[].hp` / `enemies[].hp` / `pinged[].hp`** is a coarse read of an enemy's
     health: `full` (untouched), `wounded` (in between), or `critical` (one heart left).
     Coarse on purpose, so a sighting leaks the shape of an enemy's health, not its
     exact value.
-  `you.score` is `frags + min(territory, territory_cap)` (0 if you are `out`). The
-  inner `phase` is `fighting` or `intermission` (between rounds); it is the game's
-  round phase and is distinct from the state envelope's `phase`
-  (`lobby`/`running`/`finished`).
-- **The crumbling arena** (`collapse`, default on): each round the floor collapses from
-  the outer ring inward. A floor tile's **ring** is its distance inward from the border
-  (ring 0 is the outer edge, the index grows toward the centre). On a fixed,
-  deterministic schedule measured from the round start, the outer ring begins to crack
-  after `collapse_start` ticks, each ring `ring_interval` ticks after the one outside
-  it, and a tile spends `decay_ticks` cracking (through `decay_stages` visible stages)
-  before it falls to the **void**. The innermost `keep_rings` never fall, so a solid
-  core always remains. A **void** tile is a hole: not walkable (a move into it is
-  rejected like a wall), bullets despawn entering it, but it does **not** block vision
-  (you see across the hole, and it shows in `cells` as `what: "void"`). A fighter caught
-  **alive** on a tile when it falls goes **out**: eliminated for the whole match
-  (`you.out`, `you.fell_tick`), scoring 0 and not respawning, distinct from being shot
-  (which only downs you for the round). A fighter already down when its tile falls is
-  not made out; it respawns next round. The top-level **`arena`** block gives the public
-  state of the collapse (`safe_ring` is the current edge of solid ground, `center` is
-  the safest cell, `next_fall_tick` is when the next ring goes), so steer for the centre
-  before the edge drops. The match can end by collapse attrition: when one fighter is
-  left not-out it wins ("last one standing as the arena collapsed"); if everyone falls
-  there is no winner ("the arena swallowed everyone").
+  `you.score` is `frags + min(territory, territory_cap)` (0 while you are `out` this
+  round). The inner `phase` is `fighting` or `intermission` (between rounds); it is the
+  game's round phase and is distinct from the state envelope's `phase`
+  (`lobby`/`running`/`finished`). The top-level **`match`** block tracks match progress:
+  `{round, rounds_to_win, round_wins: {name: wins}}`. `you.round_wins` is your own count.
+  The match ends when any fighter's `round_wins` reaches `rounds_to_win`.
+- **The crumbling arena** (`collapse`, default on): each round the arena collapses from
+  the outer ring inward. There is **no border wall**: a cell's **ring** is its distance
+  from the grid edge (ring 0 is the outermost row/column, the index grows toward the
+  centre), the collapsing void forms the edge, and the grid bounds stop a fighter
+  leaving the board. On a fixed, deterministic schedule measured from the round start,
+  the outer ring begins to crack after `collapse_start` ticks, each ring `ring_interval`
+  ticks after the one outside it, and a tile spends `decay_ticks` cracking (through
+  `decay_stages` visible stages) before it falls to the **void**. The innermost
+  `keep_rings` never fall, so a solid core always remains. **Walls collapse on the same
+  ring schedule as the floor**: a wall still blocks movement and vision while it is solid
+  or cracking, but once its ring falls it becomes a void hole like any other (it stops
+  blocking and stops occluding). A **void** tile (fallen floor or fallen wall) is a hole:
+  not walkable (a move into it is rejected like a wall), bullets despawn entering it, but
+  it does **not** block vision (you see across the hole, and it shows in `cells` as
+  `what: "void"`). Any fighter on a tile when it falls, **alive or already downed**, drops
+  into the void and goes **out** for the **current round** (`you.out`, `you.fell_tick`,
+  `you.out_reason == "fell into the void this round"`): it scores nothing further that
+  round, and like a downed fighter it **respawns at the start of the next round** (out and
+  fell_tick clear). Falling is no longer a match elimination; it just decides who is left
+  standing this round, and the collapse forces a round to resolve. The top-level
+  **`arena`** block gives the public state of the collapse (`safe_ring` is the current edge
+  of solid ground, `center` is the safest cell, `next_fall_tick` is when the next ring
+  goes), so steer for the centre before the edge drops. For the spectator viewer, `render`
+  lists only **standing** walls in `walls`, walls mid-decay in **`walls_cracking`**
+  (`[{x, y, decay, falls_in}]`), and every fallen cell (floor or former wall) in
+  `floor.void`; `floor.cracking` carries cracking floor cells only.
 - **Navigating (important)**: you cannot see behind you and get **no overhead map**.
   Each observation is only the forward cone, so a purely reactive agent wanders and
   stalls. Every visible cell carries its absolute `x, y`, so the intended approach
@@ -133,13 +150,16 @@ cooldowns gate how often you move or fire (one shot per second).
   the walls and open cells you have seen, remember where you last saw each enemy, and
   path-find toward unexplored cells or a target. Turn to scan (turning is free); the
   map you build is your situational awareness.
-- **Win**: your score is `frags + min(territory, territory_cap)`; first to
-  `score_to_win` (10) wins. Eliminations dominate (territory is capped below the
-  limit, so you cannot win by pacing alone), but new ground and constant movement
-  keep you ahead of a camper and unexposed. Downed fighters respawn each round, so
-  surviving a round is worth nothing by itself, but a fighter that falls into the void
-  is **out** for the match (0 points, no respawn), so the collapse can also decide the
-  game on its own. A complete reference client is
+- **Win**: a **round** goes to the last fighter standing (the collapse forces every
+  round to resolve); the **match** goes to the first to `rounds_to_win` (10) round-wins,
+  and the winner is the fighter with the most round-wins (`reason: "first to N round
+  wins"`). If a round ends with nobody in-round (everyone fell or died on the same tick),
+  the round goes to the unique highest standing (`frags + min(territory, territory_cap)`),
+  or no round-win on a tie. `score_to_win` is now only a scoreboard target; frags and
+  territory rank the scoreboard and break round ties but do not end the match. Downed
+  **and** fallen fighters both respawn each round, so no single round (and no fall) ends
+  the match. A brief idle pause never evicts a present player (`drop_after` defaults to
+  0, off). A complete reference client is
   [`examples/python-agent/skirmish_bot.py`](../examples/python-agent/skirmish_bot.py)
   (stdlib only). Source: `backend/arena/games/skirmish.py`.
 

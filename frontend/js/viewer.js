@@ -199,13 +199,16 @@ function makeSkirmishRenderer() {
   const shots = new Map();      // index -> { mesh, target }
   let prevBullets = [];         // last poll's bullet positions, to spot newly-fired shots
   let tAcc = 0;                 // accumulated time, for beacon bob/pulse and crack pulse
-  let floor = null, wallGroup = null, sig = "";
+  let floor = null, wallGroup = null, builtGrid = -1;
   // Collapsing floor: the board is built from per-cell tiles so individual cells can
   // crack, sink and fall away (a single plane cannot be punched to show a hole).
   const tiles = new Map();      // "x,y" -> { mesh, state, decay, fallsIn, stage, sink, vy, crackMat }
-  const crackTex = new Map();   // stage -> CanvasTexture, shared by every cracking tile
-  let tileGeo = null, solidMat = null, curStages = 1;
-  const TILE_H = 0.3, VOID_DEPTH = 7;
+  // Walls collapse the same way: each wall cell is its own box so it can crack, sink,
+  // glow and tumble into the abyss, then be restored solid on a new round.
+  const walls = new Map();      // "x,y" -> { mesh, x, y, state, decay, fallsIn, stage, sink, vy, crackMat }
+  const crackTex = new Map();   // stage -> CanvasTexture, shared by every cracking tile/wall
+  let tileGeo = null, solidMat = null, wallGeo = null, wallSolidMat = null, curStages = 1;
+  const TILE_H = 0.3, VOID_DEPTH = 7, WALL_H = 1.25, WALL_REST_Y = WALL_H / 2;
 
   function getCrackTex(stage, stages) {
     let t = crackTex.get(stage);
@@ -218,19 +221,27 @@ function makeSkirmishRenderer() {
   // reach them. Free them explicitly on rebuild and teardown.
   function disposeFloorExtras() {
     for (const t of tiles.values()) if (t.crackMat) { t.crackMat.dispose(); t.crackMat = null; }
+    for (const w of walls.values()) if (w.crackMat) { w.crackMat.dispose(); w.crackMat = null; }
     for (const tex of crackTex.values()) tex.dispose();
     crackTex.clear();
   }
 
   function buildArena(d) {
-    const s = `${d.grid}|${d.walls.length}`;
-    if (sig === s) return;
-    sig = s;
+    const g = d.grid;
+    // Rebuild only when the maze identity changes: a new grid size, or a wall cell we
+    // have never built (lobby placeholder -> real board, or a different match). Within a
+    // round the standing-wall set only ever shrinks as walls crack and fall, so this never
+    // rebuilds mid-collapse and the per-cell fall animations survive.
+    const incoming = [];
+    for (const [x, y] of (d.walls || [])) incoming.push(`${x},${y}`);
+    for (const c of (d.walls_cracking || [])) incoming.push(`${c.x},${c.y}`);
+    if (floor && g === builtGrid && incoming.every(k => walls.has(k))) return;
+    builtGrid = g;
     if (floor) { disposeTree(floor); root.remove(floor); }
     if (wallGroup) { disposeTree(wallGroup); root.remove(wallGroup); }
     disposeFloorExtras();
     tiles.clear();
-    const g = d.grid;
+    walls.clear();
     floor = new THREE.Group();
     // Abyss seen through holes once the floor falls away: a dark unlit plane far below.
     const abyss = new THREE.Mesh(new THREE.PlaneGeometry(g * 3, g * 3),
@@ -253,23 +264,65 @@ function makeSkirmishRenderer() {
     }
     root.add(floor);
 
+    // Wall boxes share one geometry and one solid material; individual wall meshes are
+    // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x9fb0cc, roughness: 0.75, metalness: 0.05 });
-    const geo = new THREE.BoxGeometry(0.98, 1.25, 0.98);
-    for (const [x, y] of d.walls) {
-      const m = new THREE.Mesh(geo, wallMat);
-      m.position.set(x, 0.625, y);
+    wallGeo = new THREE.BoxGeometry(0.98, WALL_H, 0.98);
+    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0x9fb0cc, roughness: 0.75, metalness: 0.05 });
+    root.add(wallGroup);
+  }
+
+  function ensureWall(key, x, y) {
+    let w = walls.get(key);
+    if (!w) {
+      const m = new THREE.Mesh(wallGeo, wallSolidMat);
+      m.position.set(x, WALL_REST_Y, y);
       m.castShadow = true; m.receiveShadow = true;
       wallGroup.add(m);
+      w = { mesh: m, x, y, state: "solid", decay: 0, fallsIn: 99, stage: -1, sink: 0, vy: 0, crackMat: null };
+      walls.set(key, w);
     }
-    root.add(wallGroup);
+    return w;
+  }
+
+  // Reconcile the wall field with this poll's data, mirroring updateFloor. Cracking walls
+  // point at the matching stage texture and start to sink/glow; a wall that has moved into
+  // floor.void begins its tumble into the abyss; everything else returns to a solid box (a
+  // new round repairs the maze). Animation happens in lerp().
+  function updateWalls(d) {
+    const crackMap = new Map();
+    (d.walls_cracking || []).forEach(c => crackMap.set(`${c.x},${c.y}`, c));
+    const voidSet = new Set((d.floor?.void || []).map(([x, y]) => `${x},${y}`));
+    for (const [x, y] of (d.walls || [])) ensureWall(`${x},${y}`, x, y);
+    for (const c of (d.walls_cracking || [])) ensureWall(`${c.x},${c.y}`, c.x, c.y);
+    for (const [key, w] of walls) {
+      if (voidSet.has(key)) {
+        if (w.state !== "void") { w.state = "void"; w.vy = 0; }   // begin the fall
+      } else if (crackMap.has(key)) {
+        const c = crackMap.get(key);
+        w.state = "crack"; w.decay = c.decay || 0; w.fallsIn = c.falls_in ?? 99;
+        const stage = Math.max(0, Math.min(curStages - 1, w.decay));
+        if (w.stage !== stage) {                  // (re)point the wall at this stage's look
+          w.stage = stage;
+          if (!w.crackMat) w.crackMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff, roughness: 0.8, emissive: 0xff7a1e, emissiveIntensity: 0 });
+          const tex = getCrackTex(stage, curStages);
+          w.crackMat.map = tex; w.crackMat.emissiveMap = tex; w.crackMat.needsUpdate = true;
+          w.mesh.material = w.crackMat;
+        }
+      } else if (w.state !== "solid") {            // standing again (new round): restore the box
+        w.state = "solid"; w.stage = -1; w.decay = 0; w.fallsIn = 99; w.vy = 0; w.sink = 0;
+        w.mesh.material = wallSolidMat; w.mesh.visible = true;
+        w.mesh.rotation.set(0, 0, 0); w.mesh.scale.setScalar(1);
+        w.mesh.position.set(w.x, WALL_REST_Y, w.y);
+      }
+    }
   }
 
   // Reconcile the tile field with this poll's floor data. Void cells start dropping;
   // cracking cells point their material at the matching stage texture; everything else
   // returns to solid (a new round repairs the board). Animation happens in lerp().
   function updateFloor(d) {
-    curStages = d.collapse?.stages || 1;
     const crackMap = new Map();
     (d.floor?.cracking || []).forEach(c => crackMap.set(`${c.x},${c.y}`, c));
     const voidSet = new Set((d.floor?.void || []).map(([x, y]) => `${x},${y}`));
@@ -289,8 +342,9 @@ function makeSkirmishRenderer() {
           t.mesh.material = t.crackMat;
         }
       } else if (t.state !== "solid") {            // repaired (new round): restore the tile
-        t.state = "solid"; t.stage = -1; t.decay = 0; t.fallsIn = 99; t.vy = 0;
+        t.state = "solid"; t.stage = -1; t.decay = 0; t.fallsIn = 99; t.vy = 0; t.sink = 0;
         t.mesh.material = solidMat; t.mesh.visible = true; t.mesh.rotation.set(0, 0, 0);
+        t.mesh.position.y = -TILE_H / 2;           // snap back up rather than drift from the abyss
       }
     }
   }
@@ -342,12 +396,21 @@ function makeSkirmishRenderer() {
   return {
     reset() {
       fighters.clear(); shots.clear(); fx.length = 0; prevBullets = []; tAcc = 0;
-      disposeFloorExtras(); tiles.clear();
-      floor = null; wallGroup = null; sig = ""; tileGeo = null; solidMat = null; curStages = 1;
+      disposeFloorExtras(); tiles.clear(); walls.clear();
+      floor = null; wallGroup = null; builtGrid = -1;
+      tileGeo = null; solidMat = null; wallGeo = null; wallSolidMat = null; curStages = 1;
+    },
+    // True while any eliminated fighter is still dropping through the hole; poll() uses
+    // this to hold the winner banner until the fall-off animations finish.
+    fallsPending() {
+      for (const rec of fighters.values()) if (rec.falling) return true;
+      return false;
     },
     update(d) {
       buildArena(d);
+      curStages = d.collapse?.stages || 1;
       updateFloor(d);
+      updateWalls(d);
       camSize = d.grid; frameOnce();
 
       const seen = new Set();
@@ -360,9 +423,13 @@ function makeSkirmishRenderer() {
           const label = makeLabel(p.name, colorFor(i));
           label.position.set(p.x, 1.7, p.y);
           root.add(group); root.add(label);
+          // A fighter first seen already out fell before we tuned in: place it gone, do
+          // not replay the drop (the out -> respawn cycle below animates real transitions).
+          const startedOut = !!p.out;
           rec = { group, label, target: new THREE.Vector3(p.x, 0, p.y),
                   heading: Math.atan2(-p.dy, p.dx), dead: !p.alive,
-                  out: false, falling: false, fallen: false, vy: 0, hp: p.hearts, hitFlash: 0 };
+                  out: startedOut, falling: false, fallen: startedOut, vy: 0, hp: p.hearts, hitFlash: 0 };
+          if (startedOut) { group.visible = false; label.visible = false; }
           fighters.set(p.id, rec);
         }
         if (p.hearts < rec.hp) {            // lost a heart since the last poll: flash red
@@ -373,14 +440,17 @@ function makeSkirmishRenderer() {
         rec.hp = p.hearts;
         rec.target.set(p.x, 0, p.y);
         if (p.alive) rec.heading = Math.atan2(-p.dy, p.dx);
+        const wasOut = rec.out;
         rec.out = !!p.out;
         rec.dead = !p.alive && !p.out;        // out (eliminated) drives its own fall, not the downed pose
-        if (rec.out && !rec.falling && !rec.fallen) {   // just dropped through the floor
+        if (rec.out && !wasOut && !rec.falling && !rec.fallen) {   // out just went false -> true
+          // Always play the burst + drop, even if the match finishes this same poll; the
+          // winner banner is held (see poll()) until in-flight drops complete.
           rec.falling = true; rec.vy = 0;
           spawnRing(p.x, p.y, 0x7a3ce0, 0.7, 0.3, 2.0, 0.1);   // dark burst marks the elimination
         }
         if (!rec.out && (rec.falling || rec.fallen)) {  // respawned / new round: lift back in
-          rec.falling = false; rec.fallen = false;
+          rec.falling = false; rec.fallen = false; rec.vy = 0;
           rec.group.visible = true; rec.label.visible = true;
           rec.group.scale.setScalar(1);
           rec.group.rotation.set(0, rec.group.rotation.y, 0);
@@ -421,12 +491,17 @@ function makeSkirmishRenderer() {
       });
       prevBullets = d.bullets.map(b => ({ x: b.x, y: b.y }));
 
-      const ranked = d.players.slice().sort((a, b) => b.score - a.score);
+      const round = d.match?.round ?? d.round ?? 0;
+      const roundsToWin = d.match?.rounds_to_win ?? d.score_to_win ?? 0;
+      const roundWins = d.match?.round_wins || {};
+      const winsOf = (p) => (typeof p.round_wins === "number" ? p.round_wins : (roundWins[p.name] || 0));
+      const ranked = d.players.slice().sort((a, b) => (winsOf(b) - winsOf(a)) || (b.score - a.score));
       renderScores(ranked.map(p => ({ label: p.name, score: p.score, frags: p.frags,
-        exposed: p.exposed, out: p.out, color: colorFor(d.players.indexOf(p)) })), "score = frags + new ground");
+        exposed: p.exposed, out: p.out, wins: winsOf(p), color: colorFor(d.players.indexOf(p)) })),
+        "score = frags + new ground", { round, roundsToWin });
       renderHealth(d.players.map((p, i) => ({ name: p.name, hearts: p.hearts,
         max: d.hearts_max, alive: p.alive, out: p.out, color: colorFor(i) })));
-      statusExtra = `round ${d.round} · first to ${d.score_to_win}`;
+      statusExtra = `round ${round} - first to ${roundsToWin}`;
     },
     lerp(dt) {
       const d = dt || 0.016;
@@ -453,6 +528,31 @@ function makeSkirmishRenderer() {
         }
         t.sink = lerpN(t.sink, targetSink, 0.15);
         t.mesh.position.y = lerpN(t.mesh.position.y, -TILE_H / 2 - t.sink, 0.2);
+      }
+      // Walls: identical treatment to floor tiles, scaled for the taller box. Void walls
+      // tumble into the abyss leaving a hole; cracking walls sink and glow toward collapse.
+      for (const w of walls.values()) {
+        if (w.state === "void") {
+          w.vy += d * 9;
+          w.mesh.position.y -= w.vy * d;
+          w.mesh.rotation.x += d * 1.5;            // tumble as it falls into the abyss
+          w.mesh.rotation.z += d * 0.8;
+          if (w.mesh.position.y < -VOID_DEPTH) w.mesh.visible = false;
+          continue;
+        }
+        let targetSink = 0;
+        if (w.state === "crack" && w.crackMat) {
+          const frac = curStages > 1 ? w.stage / (curStages - 1) : 1;
+          targetSink = 0.05 + 0.18 * frac;
+          // The nearer the fall, the brighter and more red the fault lines pulse.
+          const imminent = w.fallsIn <= 2 ? (3 - Math.max(0, w.fallsIn)) / 3 : 0;
+          const pulse = 0.5 + 0.5 * Math.sin(tAcc * 6);
+          w.crackMat.emissiveIntensity = 0.25 + 0.5 * frac + imminent * (0.6 + 0.8 * pulse);
+          w.crackMat.emissive.setHex(w.fallsIn <= 1 ? 0xff3010 : 0xff7a1e);
+          targetSink += imminent * 0.06 * pulse;
+        }
+        w.sink = lerpN(w.sink, targetSink, 0.15);
+        w.mesh.position.y = lerpN(w.mesh.position.y, WALL_REST_Y - w.sink, 0.2);
       }
       for (const rec of fighters.values()) {
         if (rec.falling) {                         // eliminated: fall through the hole, tumbling
@@ -680,14 +780,26 @@ function makeFinanceRenderer() {
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function renderScores(rows, legend) {
+// Filled/empty pips for a fighter's round-wins, sized to the rounds-to-win target so the
+// scoreboard reads "how close to taking the match". Capped so a long target cannot overflow.
+function winPips(wins, target) {
+  const span = Math.min(Math.max(wins, target || 0), 7);
+  if (!span) return "";
+  let s = "";
+  for (let i = 0; i < span; i++) s += i < wins ? "●" : "○";
+  return ` <span class="wins" title="${wins} round win${wins === 1 ? "" : "s"}">${s}</span>`;
+}
+function renderScores(rows, legend, progress) {
   scoreboard.hidden = false;
+  const prog = progress && progress.roundsToWin
+    ? `<div class="progress">Round ${esc(progress.round)} / first to ${esc(progress.roundsToWin)}</div>` : "";
   const head = legend ? `<div class="legend">${esc(legend)}</div>` : "";
-  scoresEl.innerHTML = head + rows.map(r => {
+  scoresEl.innerHTML = prog + head + rows.map(r => {
+    const pips = r.wins != null ? winPips(r.wins, progress?.roundsToWin) : "";
     const detail = r.frags != null
       ? ` <span class="sub">${r.frags} frag${r.frags === 1 ? "" : "s"}${r.exposed ? " · <b class='exp'>EXPOSED</b>" : ""}${r.out ? " · <b class='out'>OUT</b>" : ""}</span>`
       : "";
-    return `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}${detail}</span><b>${esc(r.score)}</b></div>`;
+    return `<div class="row"><span><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}${pips}${detail}</span><b>${esc(r.score)}</b></div>`;
   }).join("");
 }
 function renderHealth(rows) {
@@ -762,6 +874,7 @@ function connect(matchId, gameId) {
   const r = RENDERERS[gameId];
   if (!r) { statusEl.textContent = `no renderer for game '${gameId}'`; return; }
   let rosterMap = null;   // player_id -> name, to toast joins/drops (null = first poll, seed quietly)
+  let finishedAt = 0;     // when this match first read as finished, to time the held-banner safety window
 
   async function poll() {
     try {
@@ -800,6 +913,7 @@ function connect(matchId, gameId) {
       }
       if (frame.scene) r.update(frame.scene);
       if (info.phase === "finished") {
+        if (!finishedAt) finishedAt = Date.now();
         const res = frame.result || {};
         const players = frame.scene?.players || [];
         const nameOf = (id) => players.find(p => p.id === id)?.name || id;
@@ -809,11 +923,17 @@ function connect(matchId, gameId) {
           const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
           setBanner(`<b>Intermission</b><div class="bsub">Next round in ${t} · agents are improving</div>${info.break_note ? `<div class="bsub">${esc(info.break_note)}</div>` : ""}`);
           statusEl.textContent = `${gameId} · break · next round ${t}`;
+        } else if (r.fallsPending?.() && Date.now() - finishedAt < 4000) {
+          // Hold the winner banner while a fall-off is still in flight (4s safety cap so it
+          // can never hang); keep the board on screen so the drop is fully visible.
+          setBanner(null);
+          statusEl.textContent = `${titleFor(gameId)} · finishing…`;
         } else {
           setBanner(w.length ? `<b>Winner: ${esc(w.join(", "))}</b><div class="bsub">${esc(res.reason || "")}</div>` : `<b>Match over</b>`);
           statusEl.textContent = `${gameId} · finished · ${w.join(", ") || "-"}`;
         }
       } else {
+        finishedAt = 0;
         setBanner(null);
         statusEl.textContent = `${titleFor(gameId)} · ${statusExtra || "running"} · LIVE`;
       }

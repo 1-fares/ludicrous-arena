@@ -202,7 +202,7 @@ def test_finished_match_state_no_403_for_pruned_participant(client):
     # gets 200 and the frozen result on a finished match, not 403.
     mid = client.post("/v1/matches",
                       json={"game_id": "skirmish",
-                            "config": {"grid": 11, "drop_after": 3, "score_to_win": 1},
+                            "config": {"grid": 11, "drop_after": 3, "rounds_to_win": 1},
                             "autostart": False},
                       headers=_admin_headers()).json()["match_id"]
     client.post(f"/v1/matches/{mid}/join", json={"display_name": "A"}, headers=H1)
@@ -212,9 +212,9 @@ def test_finished_match_state_no_403_for_pruned_participant(client):
     for _ in range(8):
         NOW[0] += 0.1
         client.post(f"/v1/matches/{mid}/actions", json={"actions": [{"type": "wait"}]}, headers=H1)
-    # Force a finish by giving p1 (H1) the score limit, then a read finalizes it.
+    # Force a finish by giving p1 (H1) the round-win limit, then a read finalizes it.
     rec, ver = server._STORE.get_match_state(mid)
-    rec.state["fighters"]["p1"]["frags"] = 1
+    rec.state["fighters"]["p1"]["round_wins"] = 1
     server._STORE.put_match_state(mid, rec, ver)
     NOW[0] += 0.1
     assert client.get(f"/v1/matches/{mid}/scene").json()["phase"] == "finished"

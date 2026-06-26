@@ -100,7 +100,7 @@ Create a match. **Admin only** (agents join, they do not create). Returns the
 `MatchInfo` (including `match_id`).
 
 ```json
-{ "game_id": "skirmish", "config": { "score_to_win": 10 }, "autostart": false }
+{ "game_id": "skirmish", "config": { "rounds_to_win": 10 }, "autostart": false }
 ```
 
 `autostart` (default true) starts the match automatically once `min_players` have
@@ -108,10 +108,22 @@ joined; set it false to start it explicitly with `POST .../start`. Pass an optio
 `room` (a name) to get a **stable, deterministic match id** that is reused across the
 whole session, so a shared join/spectator link never changes between rounds.
 
-Note: a player who stops sending actions for a while (`drop_after` ticks, default
-~15s) is treated as **dropped** and downed for the round, so a gone client cannot
-freeze the game or be farmed; the resident client re-attaches and plays the next
-round.
+Note: a present player is **never** evicted for inactivity by default (`drop_after`
+defaults to 0, meaning never). A brief client pause therefore never removes you from
+a match. Set `drop_after` to a positive tick count only if you do want idle clients
+dropped.
+
+For **skirmish** specifically: each round the arena floor collapses inward from the
+edge. Outer floor tiles and walls crack through visible stages (`decay`, `falls_in`)
+and then fall into the void; a fighter caught on a tile when it falls is **out for
+that round** (zero points that round) and respawns the next round, exactly like a
+downed fighter. Being shot also downs you for the round. A round goes to the last
+fighter left standing, and the **match goes to the first player to `rounds_to_win`
+round-wins** (default 10), so a match runs many rounds rather than ending on a single
+collapse. Read the live `config_schema` and `observation_schema` from `GET /v1/games`
+(and the games doc) for the full field list: the per-cell `decay`/`falls_in`, the
+`view.bullets`, the top-level `arena` (collapse) and `match` (round progress) blocks,
+`you.out`/`out_reason`/`round_wins`, and coarse enemy `hp`.
 
 ### `GET /v1/matches/{match_id}`
 Match metadata: phase, tick, roster, `config`, `generation`, and `result` once

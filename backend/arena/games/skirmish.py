@@ -4,9 +4,10 @@ Characters live on a grid of open cells and walls. Each one occupies a cell and
 faces one of four directions. They move a cell at a time, turn in 90-degree steps,
 and can only *see* forward through a narrow cone, so walls are cover and position
 is everything. Shots travel a few cells then fade. Three hits and you are down,
-lying on the floor and out of the round. Every elimination scores a point; first
-to the score limit takes the game. Downed fighters respawn each new round, so the
-incentive is to hunt: points come from kills, not from outliving a stalled round.
+lying on the floor and out of the round. A round goes to the last fighter standing;
+the match goes to the first to `rounds_to_win` round-wins. Eliminations score frags
+(the scoreboard and the round-win tiebreak) but no longer decide the match on their
+own. Downed and fallen fighters both respawn each new round.
 
 Pacing is real-time (`realtime=true`): the world advances on the wall clock, and
 per-character cooldowns gate how often you can move or fire (one shot per second).
@@ -48,7 +49,8 @@ Config (all optional):
     grid:            int = 13      side length
     seed:            int = 1       deterministic maze + spawns
     wall_density:    float = 0.16  fraction of interior cells that are cover
-    score_to_win:    int = 10      points (frags + capped territory) to win the game
+    rounds_to_win:   int = 10      round-wins to take the match (first to N)
+    score_to_win:    int = 10      scoreboard target (display only; does not end the match)
     hearts:          int = 3       hits to eliminate
     fire_range:      int = 4       cells a shot travels before fading
     fire_cooldown:   int = 10      ticks between shots (10 tps -> 1s)
@@ -59,7 +61,7 @@ Config (all optional):
     cell_bonus:      float = 0.05  score for each new cell entered (rewards exploring)
     territory_cap:   float = 4.0   most you can earn from new ground (kills still decide)
     expose_ticks:    int = 30      ticks idle in one cell before you are exposed
-    drop_after:      int = 150     ticks with no action before a dropped client is downed (0=off)
+    drop_after:      int = 0       ticks with no action before an idle client is evicted (0=never, the default)
     collapse:        bool = True   collapsing floor: the arena falls in from the outer ring each round
     collapse_start:  int = 120     grace ticks each round before the outer ring starts cracking
     ring_interval:   int = 70      ticks between successive rings beginning to decay
@@ -67,14 +69,18 @@ Config (all optional):
     decay_stages:    int = 4       number of visible crack stages (0..decay_stages-1)
     keep_rings:      int = 2       innermost rings that never collapse (the core)
 
-The collapsing floor (`collapse=true`) shrinks the arena each round. A floor tile's
-ring is its distance inward from the border (ring 0 is the outer edge). Outer rings
-crack then fall to the void on a fixed, deterministic schedule measured from the round
-start; the innermost `keep_rings` never fall. A void tile is a hole: not walkable,
-bullets despawn entering it, and it does not block vision (you see across it). A
-fighter caught alive on a tile when it falls is OUT, eliminated for the whole match
-with zero points and no respawn (distinct from being shot, which only downs you for
-the round). A downed (already not-alive) fighter is not made out by the collapse.
+The collapsing floor (`collapse=true`) shrinks the arena each round. A cell's ring is
+its distance from the grid edge (ring 0 is the outermost row/column). There is no
+border wall: the collapsing void forms the arena edge and the grid bounds stop a
+fighter leaving the board. Outer rings crack then fall to the void on a fixed,
+deterministic schedule measured from the round start; the innermost `keep_rings` never
+fall. Walls fall on the same ring schedule as the floor: a wall still blocks movement
+and vision while it is solid or cracking, but once its ring falls it becomes a void
+hole like any other. A void tile (fallen floor or fallen wall) is a hole: not walkable,
+bullets despawn entering it, and it does not block vision (you see across it). Any
+fighter on a tile when it falls, alive or already downed, drops into the void and is
+OUT for the current round: it scores nothing further that round and, like a downed
+fighter, respawns at the start of the next round.
 """
 
 from __future__ import annotations
@@ -117,7 +123,10 @@ META = GameMeta(
             "grid": {"type": "integer", "default": 13, "minimum": 5, "maximum": 40},
             "seed": {"type": "integer", "default": 1},
             "wall_density": {"type": "number", "default": 0.16, "minimum": 0.0, "maximum": 0.5},
-            "score_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100},
+            "rounds_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100,
+                              "description": "Round-wins needed to take the match (first to N). A round goes to the last fighter standing; the match ends when a fighter reaches this many round-wins."},
+            "score_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100,
+                             "description": "Scoreboard target for frags + capped territory. Display only: it no longer ends the match (rounds_to_win does)."},
             "hearts": {"type": "integer", "default": 3, "minimum": 1, "maximum": 20},
             "fire_range": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
             "fire_cooldown": {"type": "integer", "default": 10, "minimum": 0, "maximum": 600},
@@ -134,10 +143,10 @@ META = GameMeta(
                               "description": "Most a player can earn from new ground over the match, so eliminations still decide the game."},
             "expose_ticks": {"type": "integer", "default": 30, "minimum": 0, "maximum": 6000,
                              "description": "Ticks of staying in one cell before you are exposed: your position is revealed to every living enemy (through walls) until you move. 0 disables it."},
-            "drop_after": {"type": "integer", "default": 150, "minimum": 0, "maximum": 100000,
-                           "description": "Ticks with no submitted action before a player is treated as dropped: they are downed for the round so a gone client cannot freeze the game or be farmed. 0 disables it."},
+            "drop_after": {"type": "integer", "default": 0, "minimum": 0, "maximum": 100000,
+                           "description": "Ticks with no submitted action before an idle client is evicted from the match. 0 (the default) disables it: a present player is never removed for inactivity, only a value > 0 evicts."},
             "collapse": {"type": "boolean", "default": True,
-                         "description": "Enable the collapsing floor: each round the arena falls in from the outer ring. A fighter caught alive on a tile when it falls is eliminated for the match (0 points). False keeps the floor solid (old behaviour)."},
+                         "description": "Enable the collapsing floor: each round the arena falls in from the outer ring. A fighter caught on a tile when it falls is out for the current round (0 points that round) and respawns next round, so the collapse forces every round to resolve. False keeps the floor solid (old behaviour)."},
             "collapse_start": {"type": "integer", "default": 120, "minimum": 0, "maximum": 1_000_000,
                                "description": "Grace ticks each round before the outermost ring starts to crack (timing is relative to the round start, so every round begins solid)."},
             "ring_interval": {"type": "integer", "default": 70, "minimum": 1, "maximum": 1_000_000,
@@ -185,9 +194,10 @@ META = GameMeta(
                                      "tick": {"type": "integer", "description": "Tick the hit landed."},
                                      "dir": {"enum": ["N", "E", "S", "W"], "description": "Absolute direction the bullet was travelling."},
                                      "from": {"enum": ["ahead", "right", "behind", "left"], "description": "Bearing of the shooter relative to your facing."}}},
-                    "out": {"type": "boolean", "description": "You fell into the void: eliminated for the rest of the match (not just this round). You score 0 and do not respawn."},
-                    "out_reason": {"type": ["string", "null"], "description": "\"fell into the void\" when out, else null."},
-                    "fell_tick": {"type": ["integer", "null"], "description": "Absolute tick you fell into the void, or null if you have not fallen."},
+                    "out": {"type": "boolean", "description": "You fell into the void this round: out for the rest of the current round (score 0 further this round). You respawn at the start of the next round, like a downed fighter. Round-scoped, cleared on respawn."},
+                    "out_reason": {"type": ["string", "null"], "description": "\"fell into the void this round\" when out, else null."},
+                    "fell_tick": {"type": ["integer", "null"], "description": "Absolute tick you fell into the void this round, or null if you have not fallen this round. Cleared on respawn."},
+                    "round_wins": {"type": "integer", "description": "Rounds you have won this match. The match ends when a fighter reaches rounds_to_win (see the top-level match block)."},
                 },
             },
             "view": {
@@ -204,11 +214,11 @@ META = GameMeta(
                                 "right": {"type": "integer", "description": "Lateral offset; negative is to your left."},
                                 "x": {"type": "integer", "description": "Absolute grid column."},
                                 "y": {"type": "integer", "description": "Absolute grid row."},
-                                "what": {"enum": ["wall", "empty", "enemy", "void"], "description": "void is a fallen floor tile: not walkable, bullets despawn entering it, but it does not block vision (you see across the hole)."},
+                                "what": {"enum": ["wall", "empty", "enemy", "void"], "description": "void is a fallen floor or wall tile: not walkable, bullets despawn entering it, but it does not block vision (you see across the hole). Walls fall on the same ring schedule as the floor; a wall that has not yet fallen still shows as wall (and may be cracking)."},
                                 "name": {"type": "string", "description": "Present when what == enemy."},
                                 "hp": {"enum": ["full", "wounded", "critical"], "description": "Coarse health of the enemy on this cell (present when what == enemy). full = untouched, critical = one heart left, wounded = in between."},
-                                "decay": {"type": "integer", "description": "Crack stage of this floor tile, 0 (solid) .. decay_stages-1 (about to fall). Present on empty/enemy cells; absent on wall/void."},
-                                "falls_in": {"type": ["integer", "null"], "description": "Ticks until this tile becomes void, or null if it never falls (kept core, or collapse disabled). Present on empty/enemy cells."},
+                                "decay": {"type": "integer", "description": "Crack stage of this cell, 0 (solid) .. decay_stages-1 (about to fall). Present on empty, enemy, and wall cells (walls fall on the same schedule); absent on void."},
+                                "falls_in": {"type": ["integer", "null"], "description": "Ticks until this cell becomes void, or null if it never falls (kept core, or collapse disabled). Present on empty, enemy, and wall cells."},
                             },
                         },
                     },
@@ -263,7 +273,17 @@ META = GameMeta(
             },
             "round": {"type": "integer"},
             "phase": {"enum": ["fighting", "intermission"]},
-            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name. Values are numbers: territory adds a fractional bonus. An out (fallen) fighter scores 0.",
+            "match": {
+                "type": "object",
+                "description": "Match progress toward the first-to-N round-wins finish.",
+                "properties": {
+                    "round": {"type": "integer", "description": "Current round number (1-based)."},
+                    "rounds_to_win": {"type": "integer", "description": "Round-wins needed to take the match."},
+                    "round_wins": {"type": "object", "description": "Rounds won so far, per display name.",
+                                   "additionalProperties": {"type": "integer"}},
+                },
+            },
+            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name. Values are numbers: territory adds a fractional bonus. A fighter that is out (fallen) this round scores 0 until it respawns next round.",
                        "additionalProperties": {"type": "number"}},
         },
     },
@@ -289,8 +309,9 @@ class Fighter:
     visited: list = field(default_factory=list)   # [[x,y], ...] cells already scored for territory
     last_act: int = 0            # tick of the last submitted action; stale => client gone (dropped)
     last_hit: Optional[dict] = None  # most recent hit this round: {tick, dir, from}, or None
-    out: bool = False            # fell into the void: eliminated for the match, scores 0, never respawns
-    fell_tick: Optional[int] = None  # absolute tick the fighter fell, or None
+    out: bool = False            # fell into the void this round: out for the round, scores 0; respawns next round
+    fell_tick: Optional[int] = None  # absolute tick the fighter fell this round, or None
+    round_wins: int = 0          # rounds won this match; first to rounds_to_win takes the match
 
 
 @dataclass
@@ -307,7 +328,7 @@ class Bullet:
 class State:
     cfg: dict[str, Any]
     grid: int
-    walls: list[list[int]]       # [[x,y], ...] wall cells (incl. border)
+    walls: list[list[int]]       # [[x,y], ...] interior cover cells (no border ring)
     spawns: list[list[int]]      # spawn cells, one per slot index
     fighters: dict[str, Fighter]
     bullets: list[Bullet] = field(default_factory=list)
@@ -321,15 +342,16 @@ class State:
 # ---- maze generation ------------------------------------------------------
 
 def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[int, int]]]:
-    """Deterministic, relatively-open maze: a solid border plus scattered interior
-    cover (single blocks and short segments). Returns (walls, spawn cells). Spawns
-    are taken from the largest open region, spread apart."""
+    """Deterministic, relatively-open maze: scattered interior cover (single blocks
+    and short segments), with no border wall. Returns (walls, spawn cells). Spawns are
+    taken from the largest open region, spread apart, and never on ring 0 (the
+    outermost row/column, the first ground to collapse)."""
     g = cfg["grid"]
     rng = random.Random(cfg["seed"])
     walls: set[tuple[int, int]] = set()
-    for i in range(g):
-        walls.update({(i, 0), (i, g - 1), (0, i), (g - 1, i)})
-
+    # No border ring: the collapsing void forms the arena edge, and the grid bounds
+    # (0 <= x < g) already stop a fighter leaving the board, so a perimeter wall is
+    # redundant. Cover stays interior only (off the outermost row and column).
     interior = [(x, y) for x in range(1, g - 1) for y in range(1, g - 1)]
     density = max(0.0, min(0.5, cfg["wall_density"]))   # clamp, defense in depth
     # Cap the wall count so at least max_players interior cells stay open: this
@@ -373,9 +395,12 @@ def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[i
         if len(comp) > len(best):
             best = comp
 
-    # Spawns: greedily pick cells far from those already chosen. Never empty (the
-    # wall cap keeps open cells available); fall back defensively just in case.
-    region = sorted(best) or sorted(open_cells) or [(1, 1)]
+    # Spawns: greedily pick cells far from those already chosen. Exclude ring 0 (the
+    # outermost row/column, the first ground to collapse) so no fighter starts on
+    # ground that falls early; fall back to the full region only if nothing is left.
+    pool = sorted(best) or sorted(open_cells)
+    inner = [c for c in pool if min(c[0], c[1], g - 1 - c[0], g - 1 - c[1]) >= 1]
+    region = inner or pool or [(1, 1)]
     spawns: list[tuple[int, int]] = [region[0]]
     while len(spawns) < META.max_players and len(spawns) < len(region):
         far = max(region, key=lambda c: min((c[0] - s[0]) ** 2 + (c[1] - s[1]) ** 2 for s in spawns))
@@ -390,10 +415,10 @@ def _int(v: Any) -> bool:
 
 
 def _points(f: "Fighter", cfg: dict[str, Any]) -> float:
-    """A player's standing: a point per elimination plus capped territory. Kills
-    dominate (territory is capped below the score limit), so you cannot win by
-    pacing alone, but a mover always outranks a camper on equal kills. A fighter
-    who fell into the void scores 0 for the match."""
+    """A player's standing: a point per elimination plus capped territory. Used for the
+    scoreboard and as the round-win tiebreak when a round ends with nobody in-round; it
+    no longer decides the match (round-wins do). A fighter that is out (fell into the
+    void) this round scores 0 until it respawns next round."""
     if f.out:
         return 0.0
     return f.frags + min(f.terr, cfg["territory_cap"])
@@ -410,11 +435,11 @@ def _coarse_hp(hearts: int, hearts_max: int) -> str:
 
 
 def _rings(state: "State") -> tuple[dict[tuple[int, int], int], int, tuple[int, int]]:
-    """Map each walkable (non-wall) cell to its ring index: the Chebyshev distance
-    inward from the border, with ring 0 the outermost walkable ring (touching the
-    border) and the index growing toward the centre. Purely geometric and
-    deterministic. Returns (rings, rings_total, center). rings_total is computed
-    from the grid alone (independent of interior walls) so the kept core is stable."""
+    """Map each non-wall floor cell to its ring index: the Chebyshev distance from the
+    grid edge, with ring 0 the outermost row/column and the index growing toward the
+    centre. Purely geometric and deterministic. Returns (rings, rings_total, center).
+    rings_total is computed from the grid alone (independent of where walls sit) so the
+    kept core is stable; the centre cell is the highest ring."""
     g = state.grid
     walls = {(x, y) for x, y in state.walls}
     rings: dict[tuple[int, int], int] = {}
@@ -422,8 +447,7 @@ def _rings(state: "State") -> tuple[dict[tuple[int, int], int], int, tuple[int, 
         for y in range(g):
             if (x, y) in walls:
                 continue
-            r = min(x, g - 1 - x, y, g - 1 - y) - 1
-            rings[(x, y)] = max(0, r)
+            rings[(x, y)] = min(x, g - 1 - x, y, g - 1 - y)
     rings_total = max(0, (g - 1) // 2)
     c = (g - 1) // 2
     return rings, rings_total, (c, c)
@@ -499,10 +523,13 @@ class Skirmish:
         occupied = {(f.x, f.y) for f in state.fighters.values()}
         if (sx, sy) in occupied:                    # deterministic free cell if the spawn is taken
             walls = self._wallset(state)
-            free = [(x, y) for x in range(state.grid) for y in range(state.grid)
+            g = state.grid
+            free = [(x, y) for x in range(g) for y in range(g)
                     if (x, y) not in walls and (x, y) not in occupied]
-            if free:
-                sx, sy = free[(i * 7) % len(free)]
+            inner = [c for c in free if min(c[0], c[1], g - 1 - c[0], g - 1 - c[1]) >= 1]
+            pick = inner or free                    # prefer ring >= 1, off the first ground to fall
+            if pick:
+                sx, sy = pick[(i * 7) % len(pick)]
         state.fighters[slot.player_id] = Fighter(name=slot.display_name, x=sx, y=sy,
                                                  facing=i % 4, hearts=state.cfg["hearts"],
                                                  last_act=state.tick)
@@ -522,14 +549,22 @@ class Skirmish:
                 if f.alive and pid != exclude}
 
     def _void_at(self, state: State, e: int) -> set[tuple[int, int]]:
-        """Set of cells that are void (fallen) at round elapsed ``e``. Derived from
-        the ring geometry and config, never stored."""
+        """Set of cells that are void (fallen) at round elapsed ``e``: every cell,
+        floor OR wall, whose ring has collapsed by ``e``. Walls fall on the same ring
+        schedule as the floor, so a wall on a fallen ring is a hole like any other.
+        Derived from ring geometry and config, never stored."""
         cfg = state.cfg
         if not cfg.get("collapse", True):
             return set()
-        rings, rings_total, _ = _rings(state)
-        return {cell for cell, r in rings.items()
-                if _tile_status(cfg, r, rings_total, e)[0] == "void"}
+        g = state.grid
+        rings_total = max(0, (g - 1) // 2)
+        out: set[tuple[int, int]] = set()
+        for x in range(g):
+            for y in range(g):
+                r = min(x, g - 1 - x, y, g - 1 - y)
+                if _tile_status(cfg, r, rings_total, e)[0] == "void":
+                    out.add((x, y))
+        return out
 
     def _blocked(self, state: State, cell: tuple[int, int], mover: str) -> bool:
         g = state.grid
@@ -679,14 +714,14 @@ class Skirmish:
                 alive_bullets.append(b)
         state.bullets = alive_bullets
 
-        # Falling floor: a fighter still standing (alive) on a tile that has just
-        # become void is eliminated FOR THE MATCH (out): zero points, no respawn.
-        # A downed fighter (already not alive) is lying low and is not made out by the
-        # collapse; it respawns next round as normal. fell_tick is the absolute tick
-        # the fall takes effect, which matches the post-increment state.tick.
+        # Falling floor: every fighter on a tile that has just become void drops into
+        # the hole, whether alive or already downed. Falling puts them OUT for the
+        # current round (zero points the rest of this round); _new_round respawns them
+        # next round, like a downed fighter. A downed body no longer hovers over a hole.
+        # fell_tick is the absolute tick the fall takes effect (the post-increment tick).
         if void:
             for f in state.fighters.values():
-                if f.alive and not f.out and (f.x, f.y) in void:
+                if not f.out and (f.x, f.y) in void:
                     f.alive = False
                     f.out = True
                     f.fell_tick = state.tick + 1
@@ -697,13 +732,16 @@ class Skirmish:
     def _resolve_round(self, state: State) -> None:
         cfg = state.cfg
         if state.phase == "fighting":
+            # In-round = still standing this round (alive implies not out/fallen, since
+            # both downing and falling clear alive). The round ends when at most one
+            # fighter is in-round; that fighter wins it (round_wins += 1). round_limit
+            # (off by default) force-resets a stalled round, awarding nothing.
             alive = [f for f in state.fighters.values() if f.alive]
-            # Eliminations are scored as they land (see tick). A round resets only
-            # to respawn the downed and keep the hunt going; surviving a round, or
-            # outlasting a stalled one, is worth nothing on its own. round_limit
-            # (off by default) just force-resets a round that has stalled.
+            natural_end = len(alive) <= 1 and len(state.fighters) >= 2
             timed_out = cfg["round_limit"] > 0 and state.tick - state.round_start >= cfg["round_limit"]
-            if (len(alive) <= 1 and len(state.fighters) >= 2) or timed_out:
+            if natural_end or timed_out:
+                if natural_end:
+                    self._award_round(state, alive)
                 state.phase = "intermission"
                 state.inter_cd = cfg["intermission"]
                 state.bullets = []
@@ -711,20 +749,36 @@ class Skirmish:
         # intermission
         state.inter_cd -= 1
         if state.inter_cd <= 0:
-            if max((_points(f, cfg) for f in state.fighters.values()), default=0) >= cfg["score_to_win"]:
+            if max((f.round_wins for f in state.fighters.values()), default=0) >= cfg["rounds_to_win"]:
                 return  # leave finished; result() ends the match
             self._new_round(state)
 
+    def _award_round(self, state: State, alive: list[Fighter]) -> None:
+        """Credit the round-win when a round ends. The lone in-round survivor wins it.
+        If nobody is in-round (all fell or died on the same tick), the round goes to the
+        unique highest standing (_points); a tie awards no round-win (a drawn round)."""
+        if len(alive) == 1:
+            alive[0].round_wins += 1
+            return
+        if alive:
+            return
+        top = max((_points(f, state.cfg) for f in state.fighters.values()), default=0.0)
+        leaders = [f for f in state.fighters.values() if _points(f, state.cfg) == top]
+        if len(leaders) == 1:
+            leaders[0].round_wins += 1
+
     def _new_round(self, state: State) -> None:
         for i, (pid, f) in enumerate(state.fighters.items()):
-            if f.out:
-                continue                                       # fell into the void: gone for the match, no respawn
+            # Falling is round-scoped: clear out/fell_tick and respawn the fighter, the
+            # same as a downed fighter. round_wins/frags/terr persist across rounds.
+            f.out = False
+            f.fell_tick = None
             sx, sy = state.spawns[i % len(state.spawns)]
             f.x, f.y, f.facing = sx, sy, i % 4
             f.hearts = state.cfg["hearts"]
             f.alive = True
             f.move_cd = f.fire_cd = 0
-            f.idle, f.exposed, f.px, f.py = 0, False, sx, sy   # frags/terr persist across rounds
+            f.idle, f.exposed, f.px, f.py = 0, False, sx, sy   # frags/terr/round_wins persist across rounds
             f.last_hit = None                                  # a new round clears stale damage cues
             f.last_act = state.tick                            # fresh drop grace each round
         state.bullets = []
@@ -759,13 +813,16 @@ class Skirmish:
         `forward` (1..sight ahead) and `right` (negative is left)."""
         cfg = state.cfg
         g = state.grid
-        walls = self._wallset(state)
-        hearts_max = cfg["hearts"]
-        # Floor decay is geometric and time-derived. Void cells are holes: not walls,
-        # so they do not block line of sight (you see across them) and are reported as
-        # what == "void" rather than occluding the cone.
-        rings, rings_total, _ = _rings(state)
         e = state.tick - state.round_start
+        # Walls fall on the same ring schedule as the floor. A standing wall (solid or
+        # cracking) still blocks movement and line of sight; a fallen wall is a void
+        # hole, so it neither blocks nor occludes. "walls" here is the STANDING set:
+        # static walls minus any whose ring has already fallen. Void cells are holes:
+        # they do not block line of sight and are reported as what == "void".
+        void = self._void_at(state, e)
+        walls = self._wallset(state) - void
+        hearts_max = cfg["hearts"]
+        rings_total = max(0, (g - 1) // 2)
         fwd = DIRS[f.facing]
         rt = DIRS[(f.facing + 1) % 4]     # the agent's right-hand direction
         enemy_at = {(en.x, en.y): en for pid, en in state.fighters.items()
@@ -779,12 +836,14 @@ class Skirmish:
                 if not (0 <= cx < g and 0 <= cy < g):
                     continue
                 if not self._sees(walls, f.x, f.y, cx, cy):
-                    continue               # behind a wall: not visible (void does not occlude)
-                if (cx, cy) in walls:
-                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "wall"})
+                    continue               # behind a standing wall (void does not occlude)
+                phase, decay, falls_in = _tile_status(
+                    cfg, min(cx, g - 1 - cx, cy, g - 1 - cy), rings_total, e)
+                if (cx, cy) in walls:      # standing wall: blocks, and may be cracking
+                    cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "wall",
+                                  "decay": decay, "falls_in": falls_in})
                     continue
-                phase, decay, falls_in = _tile_status(cfg, rings.get((cx, cy), 0), rings_total, e)
-                if phase == "void":
+                if phase == "void":        # fallen floor or fallen wall: a hole
                     cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "void"})
                 elif (cx, cy) in enemy_at:
                     en = enemy_at[(cx, cy)]
@@ -850,81 +909,91 @@ class Skirmish:
                     "camp_ticks": f.idle, "expose_at": cfg["expose_ticks"],
                     "last_hit": f.last_hit,
                     "out": f.out,
-                    "out_reason": "fell into the void" if f.out else None,
-                    "fell_tick": f.fell_tick},
+                    "out_reason": "fell into the void this round" if f.out else None,
+                    "fell_tick": f.fell_tick,
+                    "round_wins": f.round_wins},
             "view": view,
             "arena": arena,
             "round": state.round,
             "phase": state.phase,
+            "match": {"round": state.round, "rounds_to_win": cfg["rounds_to_win"],
+                      "round_wins": {f.name: f.round_wins for f in state.fighters.values()}},
             "scores": {f.name: round(_points(f, cfg), 2) for f in state.fighters.values()},
         }
 
     def render(self, state: State) -> dict[str, Any]:
         cfg = state.cfg
-        # Only the non-solid floor cells are listed; the viewer treats any cell not
-        # named here as solid. cracking carries the crack stage and countdown so the
-        # viewer can animate; void cells are fully fallen holes.
-        rings, rings_total, center = _rings(state)
+        g = state.grid
         e = state.tick - state.round_start
-        cracking: list[dict[str, Any]] = []
+        rings_total = max(0, (g - 1) // 2)
+        c = (g - 1) // 2
+        wallset = self._wallset(state)
+        # Walls and floor decay on the same ring schedule. The viewer treats any cell
+        # not named here as solid floor. Standing walls (solid or cracking) are listed
+        # in "walls"; a wall mid-decay also appears in "walls_cracking". Every fallen
+        # cell, floor or former wall, is a hole and goes in floor.void; floor cells
+        # mid-decay go in floor.cracking.
+        walls_standing: list[list[int]] = []
+        walls_cracking: list[dict[str, Any]] = []
+        floor_cracking: list[dict[str, Any]] = []
         void: list[list[int]] = []
-        for (x, y), r in rings.items():
-            phase, decay, falls_in = _tile_status(cfg, r, rings_total, e)
-            if phase == "cracking":
-                cracking.append({"x": x, "y": y, "decay": decay, "falls_in": falls_in})
-            elif phase == "void":
-                void.append([x, y])
+        for x in range(g):
+            for y in range(g):
+                phase, decay, falls_in = _tile_status(
+                    cfg, min(x, g - 1 - x, y, g - 1 - y), rings_total, e)
+                if phase == "void":
+                    void.append([x, y])                       # every hole, floor or wall
+                elif (x, y) in wallset:
+                    walls_standing.append([x, y])
+                    if phase == "cracking":
+                        walls_cracking.append({"x": x, "y": y, "decay": decay, "falls_in": falls_in})
+                elif phase == "cracking":
+                    floor_cracking.append({"x": x, "y": y, "decay": decay, "falls_in": falls_in})
         return {
             "grid": state.grid,
-            "walls": state.walls,
+            "walls": walls_standing,
             "round": state.round,
             "phase": state.phase,
             "score_to_win": cfg["score_to_win"],
+            "rounds_to_win": cfg["rounds_to_win"],
             "hearts_max": cfg["hearts"],
+            "match": {"round": state.round, "rounds_to_win": cfg["rounds_to_win"],
+                      "round_wins": {f.name: f.round_wins for f in state.fighters.values()}},
             "players": [
                 {"id": pid, "name": f.name, "x": f.x, "y": f.y,
                  "dx": DIRS[f.facing][0], "dy": DIRS[f.facing][1],
                  "hearts": f.hearts, "alive": f.alive, "exposed": f.exposed,
                  "score": round(_points(f, cfg), 2), "frags": f.frags,
-                 "out": f.out, "fell_tick": f.fell_tick}
+                 "out": f.out, "fell_tick": f.fell_tick, "round_wins": f.round_wins}
                 for pid, f in state.fighters.items()
             ],
             "bullets": [{"x": round(b.x, 2), "y": round(b.y, 2)} for b in state.bullets],
-            "floor": {"cracking": cracking, "void": void},
+            "floor": {"cracking": floor_cracking, "void": void},
+            "walls_cracking": walls_cracking,
             "collapse": {"on": bool(cfg.get("collapse", True)), "stages": cfg["decay_stages"],
-                         "center": [center[0], center[1]],
+                         "center": [c, c],
                          "safe_ring": _safe_ring(cfg, rings_total, e)},
         }
 
     def result(self, state: State) -> Optional[MatchResult]:
         cfg = state.cfg
         scores = {f.name: round(_points(f, cfg), 2) for f in state.fighters.values()}
-        # Out (fallen) fighters score 0 and can never win: exclude them from every
-        # winner set.
-        elig = {pid: _points(f, cfg) for pid, f in state.fighters.items() if not f.out}
-        out_count = len(state.fighters) - len(elig)
-        # Collapse endings: once the arena has swallowed at least one fighter, the
-        # match can end by attrition to the void before any score limit is hit.
-        if out_count >= 1 and len(state.fighters) >= 2:
-            if len(elig) == 1:
-                return MatchResult(finished_tick=state.tick, winners=list(elig.keys()),
-                                   scores=scores,
-                                   reason="last one standing as the arena collapsed")
-            if len(elig) == 0:
-                return MatchResult(finished_tick=state.tick, winners=[],
-                                   scores=scores, reason="the arena swallowed everyone")
-        top = max(elig.values(), default=0.0)
-        # Points (frags + capped territory) accumulate mid-round, so the game ends the
-        # instant a fighter reaches the limit, regardless of phase. The climb is visible.
-        if elig and top >= cfg["score_to_win"]:
-            return MatchResult(finished_tick=state.tick,
-                               winners=[pid for pid, s in elig.items() if s == top],
-                               scores=scores, reason="reached the score limit")
-        # Safety cap so a stalled match cannot run forever.
-        if state.tick >= cfg["score_to_win"] * 6000:
-            return MatchResult(finished_tick=state.tick,
-                               winners=[pid for pid, s in elig.items() if s == top],
-                               scores=scores, reason="time cap reached")
+        n = cfg["rounds_to_win"]
+        # First to N round-wins takes the match. Out (fallen) is round-scoped now, so it
+        # is not a winner filter; round_wins decides outright. round_wins only changes
+        # when a round resolves, so the match ends the instant a fighter reaches N.
+        best = max((f.round_wins for f in state.fighters.values()), default=0)
+        if state.fighters and best >= n:
+            winners = [pid for pid, f in state.fighters.items() if f.round_wins == best]
+            return MatchResult(finished_tick=state.tick, winners=winners, scores=scores,
+                               reason=f"first to {n} round wins")
+        # Safety cap so a stalled match cannot run forever: award to the round-win
+        # leader(s); a 0-0 stall has no winner.
+        if state.tick >= n * 6000:
+            winners = [pid for pid, f in state.fighters.items()
+                       if f.round_wins == best and best > 0]
+            return MatchResult(finished_tick=state.tick, winners=winners, scores=scores,
+                               reason="time cap reached")
         return None
 
     # -- persistence -------------------------------------------------------
