@@ -17,6 +17,10 @@ resource "aws_lambda_function" "api" {
   source_code_hash = filebase64sha256(var.lambda_zip)
   memory_size      = var.lambda_memory
   timeout          = var.lambda_timeout
+  # Master kill switch (var.api_enabled): 0 reserved concurrency disables the
+  # function, so API Gateway cannot invoke it and abusive/wrong-token traffic
+  # runs no code and reads no DynamoDB. -1 is the normal "no reservation" state.
+  reserved_concurrent_executions = var.api_enabled ? -1 : 0
   # Pinned so it can never silently diverge from the wheel platform the package
   # is built for (scripts/package-lambda.sh uses x86_64-manylinux2014).
   architectures = ["x86_64"]

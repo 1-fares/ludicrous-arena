@@ -127,6 +127,12 @@ in [docs/GAMES.md](docs/GAMES.md#adding-a-game). Non-negotiable rules:
 - Terraform default region `eu-central-1`; state local until the S3 backend in
   `main.tf` is enabled. Run `package-lambda.sh` before the first `terraform apply`
   (the Lambda resource needs the zip to exist).
+- **API kill switch**: `terraform/api-switch.auto.tfvars` sets `api_enabled`. `false`
+  pins the Lambda's `reserved_concurrent_executions` to 0, so API Gateway cannot
+  invoke it: wrong-token and random internet requests run no code and read no
+  DynamoDB, holding cost near zero while idle. Flip to `true` and re-apply
+  (`scripts/deploy.sh`) to re-enable play. The committed value is the live on/off
+  state. While off, the static viewer still loads but its data calls return errors.
 
 ## Status
 
