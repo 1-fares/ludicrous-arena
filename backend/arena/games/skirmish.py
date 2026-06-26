@@ -69,14 +69,17 @@ Config (all optional):
     ring_interval:   int = 120     ticks between successive rings beginning to decay
     decay_ticks:     int = 60      ticks a tile spends visibly cracking before it falls
     decay_stages:    int = 4       number of visible crack stages (0..decay_stages-1)
-    keep_rings:      int = 2       innermost rings that never collapse (the core)
+    keep_rings:      int = 0       extra rings kept beyond the always-solid centre cell (0 = collapse all the way to a single centre tile, so a round always resolves)
 
 The collapsing floor (`collapse=true`) shrinks the arena each round. A cell's ring is
 its distance from the grid edge (ring 0 is the outermost row/column). There is no
 border wall: the collapsing void forms the arena edge and the grid bounds stop a
 fighter leaving the board. Outer rings crack then fall to the void on a fixed,
-deterministic schedule measured from the round start; the innermost `keep_rings` never
-fall. Walls fall on the same ring schedule as the floor: a wall still blocks movement
+deterministic schedule measured from the round start, all the way in: by default only
+the single centre cell is permanent (`keep_rings` extra rings can be kept around it).
+Because the floor keeps decaying down to that one tile, two fighters can never both sit
+on a static core, so the round is always forced to resolve instead of stalling. Walls
+fall on the same ring schedule as the floor: a wall still blocks movement
 and vision while it is solid or cracking, but once its ring falls it becomes a void
 hole like any other. A void tile (fallen floor or fallen wall) is a hole: not walkable,
 bullets despawn entering it, and it does not block vision (you see across it). Any
@@ -157,8 +160,8 @@ META = GameMeta(
                             "description": "Ticks a tile spends visibly cracking before it falls into the void."},
             "decay_stages": {"type": "integer", "default": 4, "minimum": 1, "maximum": 8,
                              "description": "Number of visible crack stages (0..decay_stages-1) a tile passes through while decaying."},
-            "keep_rings": {"type": "integer", "default": 2, "minimum": 1, "maximum": 1000,
-                           "description": "Innermost rings that never collapse, so a solid core always remains to fight on and a round can resolve."},
+            "keep_rings": {"type": "integer", "default": 0, "minimum": 0, "maximum": 1000,
+                           "description": "Extra innermost rings kept solid beyond the always-solid centre cell. Default 0: the floor collapses all the way down to a single centre tile, so two fighters cannot both survive on a static core and the round is always forced to resolve. Raise it to leave a larger permanent core (which can let fighters camp indefinitely if they do not engage)."},
         },
     },
     action_schema={

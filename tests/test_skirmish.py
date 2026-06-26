@@ -459,6 +459,25 @@ def test_downed_fighter_on_collapsing_tile_goes_out():
     assert p1.out and not p1.alive and p1.fell_tick == 10
 
 
+def test_collapse_continues_to_centre_and_forces_resolution():
+    # Regression for a frozen match: with a large permanent core, two fighters that never
+    # engage sit on the solid centre forever and the round never ends. With the default
+    # keep_rings 0 the floor decays all the way down to the single centre cell, so the
+    # round must resolve on its own (here both fall, a draw) and the match keeps cycling
+    # instead of freezing. Neither fighter ever acts; only the collapse can end the round.
+    g = _game()
+    st = g.init_state(_collapse_cfg(collapse_start=0, ring_interval=1, decay_ticks=1,
+                                    keep_rings=0, intermission=1, rounds_to_win=99),
+                      _slots(2))
+    _clear_interior(st)
+    st.fighters["p1"].x, st.fighters["p1"].y = 1, 1
+    st.fighters["p2"].x, st.fighters["p2"].y = 9, 9
+    start = st.round
+    for _ in range(100):
+        g.tick(st, 0.1)
+    assert st.round > start                  # rounds kept resolving; the match never froze
+
+
 def test_vision_sees_across_void():
     # A void tile is a hole, not a wall: it does not block line of sight. Looking from
     # the kept core out across the fallen edge, the farthest fallen tile is still

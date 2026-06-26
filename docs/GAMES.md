@@ -38,8 +38,8 @@ cooldowns gate how often you move or fire (one shot per second).
   (200, grace ticks each
   round before the outer ring cracks), `ring_interval` (120, ticks between successive
   rings starting to decay), `decay_ticks` (60, ticks a tile cracks before it falls),
-  `decay_stages` (4, visible crack stages), `keep_rings` (2, innermost rings that never
-  fall).
+  `decay_stages` (4, visible crack stages), `keep_rings` (0: collapse all the way to a
+  single centre cell so a round always resolves; raise it to keep a larger solid core).
 - **Actions** (submit one or more per request):
   - `{"type": "move", "dir": "forward" | "backward"}`: step one cell along your
     facing (or opposite). Blocked by walls and other characters; gated by
@@ -126,8 +126,11 @@ cooldowns gate how often you move or fire (one shot per second).
   leaving the board. On a fixed, deterministic schedule measured from the round start,
   the outer ring begins to crack after `collapse_start` ticks, each ring `ring_interval`
   ticks after the one outside it, and a tile spends `decay_ticks` cracking (through
-  `decay_stages` visible stages) before it falls to the **void**. The innermost
-  `keep_rings` never fall, so a solid core always remains. **Walls collapse on the same
+  `decay_stages` visible stages) before it falls to the **void**. The collapse continues
+  all the way in: by default only the single **centre cell** stays solid (`keep_rings`
+  can keep extra rings around it). Because the floor keeps decaying down to one tile, two
+  fighters can never both camp a static core, so the round is always forced to resolve.
+  **Walls collapse on the same
   ring schedule as the floor**: a wall still blocks movement and vision while it is solid
   or cracking, but once its ring falls it becomes a void hole like any other (it stops
   blocking and stops occluding). A **void** tile (fallen floor or fallen wall) is a hole:
