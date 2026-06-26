@@ -255,13 +255,13 @@ def test_state_json_roundtrip():
     assert g.render(restored) == g.render(st)
 
 
-def test_drop_after_downs_an_inactive_fighter():
-    # A client that submits no action for drop_after ticks is downed, so a gone
-    # player cannot freeze the round or be farmed. An active player is untouched.
+def test_drop_after_removes_an_inactive_fighter():
+    # A client that submits no action for drop_after ticks is removed from the game
+    # entirely (no phantom body). An active player is untouched.
     g = _game()
     st = g.init_state({"grid": 11, "drop_after": 3, "score_to_win": 10}, _slots(2))
     for _ in range(5):
         g.apply(st, "p1", {"type": "wait"})   # p1 stays active; p2 never acts
         g.tick(st, 0.1)
-    assert st.fighters["p2"].inactive and not st.fighters["p2"].alive
-    assert st.fighters["p1"].alive
+    assert "p2" not in st.fighters and "p1" in st.fighters
+    assert g.active_players(st) == {"p1"}

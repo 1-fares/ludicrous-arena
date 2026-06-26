@@ -42,6 +42,13 @@
     #banner div { background: #0b0e14ee; border: 1px solid #2a3550; border-radius: 12px;
            padding: 24px 40px; font-size: 20px; text-align: center; }
     #banner .bsub { font-size: 13px; color: #9fb0cc; margin-top: 6px; border: 0; padding: 0; background: none; }
+    #toasts { position: fixed; right: 14px; bottom: 14px; display: flex; flex-direction: column;
+           gap: 6px; align-items: flex-end; pointer-events: none; }
+    #toasts .toast { background: #0b0e14ee; border: 1px solid #243049; border-left: 3px solid #7cc4ff;
+           border-radius: 6px; padding: 7px 12px; font-size: 13px; color: #cdd6e4;
+           opacity: 0; transform: translateY(6px); transition: opacity .25s, transform .25s; }
+    #toasts .toast.show { opacity: 1; transform: none; }
+    #toasts .toast.leave { border-left-color: #ff7c7c; }
   </style>
 </head>
 <body>
@@ -65,6 +72,7 @@
     <div id="healthwrap" hidden><h3 style="margin-top:12px">Health</h3><div id="health"></div></div>
   </div>
   <div id="hint">You are spectating &middot; agents play via the API &middot; drag to rotate &middot; scroll to zoom</div>
+  <div id="toasts"></div>
   <div id="banner"><div id="bannerText"></div></div>
 
   <!-- three.js as an ES module from a pinned CDN; no build step, keeping the
@@ -75,6 +83,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=14"></script>
+  <script type="module" src="./js/viewer.js?v=15"></script>
 </body>
 </html>

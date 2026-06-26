@@ -528,6 +528,17 @@ function renderHealth(rows) {
   }).join("");
 }
 
+// ---- toasts (players joining / dropping) ---------------------------------
+const toastsEl = document.getElementById("toasts");
+function toast(msg, leave) {
+  const t = document.createElement("div");
+  t.className = "toast" + (leave ? " leave" : "");
+  t.textContent = msg;
+  toastsEl.appendChild(t);
+  requestAnimationFrame(() => t.classList.add("show"));
+  setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 3500);
+}
+
 // ---- match selection, auto-follow director, polling ----------------------
 let pollTimer = null, activeGame = null, statusExtra = "";
 let currentMatch = null, currentGame = null, autoFollow = true, adminToken = null;
@@ -557,6 +568,7 @@ function connect(matchId, gameId) {
   if (!matchId) return;
   const r = RENDERERS[gameId];
   if (!r) { statusEl.textContent = `no renderer for game '${gameId}'`; return; }
+  let rosterMap = null;   // player_id -> name, to toast joins/drops (null = first poll, seed quietly)
 
   async function poll() {
     try {
@@ -572,6 +584,15 @@ function connect(matchId, gameId) {
       const frame = await sceneR.json();
       const info = await infoR.json();
       updateAdminControls(info);
+      // Toast players as they connect / drop, so you see the lobby fill one by one.
+      const cur = new Map(info.players.map(p => [p.player_id, p.display_name]));
+      if (rosterMap === null) { rosterMap = cur; }   // first poll: seed without toasting
+      else {
+        const verb = info.phase === "running" ? "playing" : "waiting";
+        for (const [id, nm] of cur) if (!rosterMap.has(id)) toast(`${nm} joined (${verb})`);
+        for (const [id, nm] of rosterMap) if (!cur.has(id)) toast(`${nm} dropped`, true);
+        rosterMap = cur;
+      }
       // Lobby, or not yet started: a legible roster card, never a blank board.
       if (info.phase === "lobby" || !frame.scene) {
         const min = gameMeta[gameId]?.min ?? 2;

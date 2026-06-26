@@ -102,11 +102,14 @@ def cmd_mint(led, args):
 
 def cmd_create(led, args):
     cfg = json.loads(args.config) if args.config else {"score_to_win": args.score}
-    info = _req(led, "POST", "/v1/matches",
-                {"game_id": args.game, "config": cfg, "autostart": False}, _admin(led))
+    body = {"game_id": args.game, "config": cfg, "autostart": False}
+    if args.room:
+        body["room"] = args.room
+    info = _req(led, "POST", "/v1/matches", body, _admin(led))
     led["match"] = info["match_id"]
+    led["room"] = args.room
     _save(led)
-    print(f"match: {info['match_id']}  ({args.game})")
+    print(f"match: {info['match_id']}  ({args.game}{', room ' + args.room if args.room else ''})")
     print(f"watch: {VIEWER}/?match={info['match_id']}")
 
 
@@ -208,6 +211,7 @@ def main():
 
     p = sub.add_parser("create", help="admin-create one match (autostart off)")
     p.add_argument("--game", default="skirmish")
+    p.add_argument("--room", help="stable room name (deterministic, reusable match id)")
     p.add_argument("--score", type=int, default=10, help="score_to_win (ignored if --config)")
     p.add_argument("--config", help="full config JSON (overrides --score)")
     p.set_defaults(fn=cmd_create)

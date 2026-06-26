@@ -207,8 +207,7 @@ class Fighter:
     px: int = -1                 # cell at the previous tick, to detect movement
     py: int = -1
     visited: list = field(default_factory=list)   # [[x,y], ...] cells already scored for territory
-    last_act: int = 0            # tick of the last submitted action; stale => client gone
-    inactive: bool = False       # dropped (no actions for drop_after ticks); downed so the round resolves
+    last_act: int = 0            # tick of the last submitted action; stale => client gone (dropped)
 
 
 @dataclass
@@ -353,6 +352,11 @@ class Skirmish:
                                                  facing=i % 4, hearts=state.cfg["hearts"],
                                                  last_act=state.tick)
 
+    def active_players(self, state: State) -> set[str]:
+        """player_ids still in the game. A dropped player (removed in tick) is gone,
+        so the engine prunes them from the match roster."""
+        return set(state.fighters.keys())
+
     # -- spatial helpers ---------------------------------------------------
 
     def _wallset(self, state: State) -> set[tuple[int, int]]:
@@ -443,17 +447,19 @@ class Skirmish:
         cfg = state.cfg
         expose = cfg["expose_ticks"]
         drop = cfg["drop_after"]
-        for f in state.fighters.values():
+        dropped: list[str] = []
+        for pid, f in state.fighters.items():
             if f.move_cd > 0:
                 f.move_cd -= 1
             if f.fire_cd > 0:
                 f.fire_cd -= 1
-            # Drop a gone client: no action for drop_after ticks downs the fighter so
-            # the round resolves and an absent body cannot be farmed. The resident
-            # client re-attaches and plays the next round.
-            if drop and f.alive and state.phase == "fighting" and state.tick - f.last_act >= drop:
-                f.alive = False
-                f.inactive = True
+            # Drop a gone client: no action for drop_after ticks removes the player
+            # from the game entirely (no phantom body left behind). If they reconnect
+            # they re-join as a fresh player at score 0. (Stamp the tick we noticed,
+            # so a fighter created this tick gets a full grace window.)
+            if drop and state.tick - f.last_act >= drop:
+                dropped.append(pid)
+                continue
             # Idle tracking: staying in one cell raises idle; moving resets it. Past
             # expose_ticks the fighter is "exposed" and broadcast to all enemies.
             if (f.x, f.y) == (f.px, f.py):
@@ -462,6 +468,8 @@ class Skirmish:
                 f.idle = 0
                 f.px, f.py = f.x, f.y
             f.exposed = bool(expose) and f.alive and f.idle >= expose
+        for pid in dropped:
+            del state.fighters[pid]
 
         walls = self._wallset(state)
         speed = cfg["bullet_speed"]
@@ -522,7 +530,7 @@ class Skirmish:
             f.alive = True
             f.move_cd = f.fire_cd = 0
             f.idle, f.exposed, f.px, f.py = 0, False, sx, sy   # frags/terr persist across rounds
-            f.last_act, f.inactive = state.tick, False         # fresh drop grace each round
+            f.last_act = state.tick                            # fresh drop grace each round
         state.bullets = []
         state.round += 1
         state.phase = "fighting"
@@ -623,7 +631,6 @@ class Skirmish:
                 {"id": pid, "name": f.name, "x": f.x, "y": f.y,
                  "dx": DIRS[f.facing][0], "dy": DIRS[f.facing][1],
                  "hearts": f.hearts, "alive": f.alive, "exposed": f.exposed,
-                 "inactive": f.inactive,
                  "score": round(_points(f, state.cfg), 2), "frags": f.frags}
                 for pid, f in state.fighters.items()
             ],

@@ -177,3 +177,19 @@ def test_late_join_into_running_match_starts_at_zero():
     names = {p["name"]: p["score"] for p in scene["players"]}
     assert len(scene["players"]) == 3
     assert names.get("Gus") == 0.0                        # late joiner starts fresh
+
+
+def test_dropped_player_is_pruned_from_roster():
+    # A gone client is removed from the world and from the match roster, so the
+    # lobby/viewer reflect who is actually playing (no phantom).
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11, "drop_after": 3, "score_to_win": 10}, autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "A", None)
+    eng.join_match(mid, "u2", "B", None)
+    eng.start_match(mid)
+    for _ in range(8):                        # u1 keeps acting; u2 never does
+        now[0] += 0.1
+        eng.submit_actions(mid, "u1", [{"type": "wait"}])
+    roster = {p.user_id for p in eng.get_info(mid).players}
+    assert "u1" in roster and "u2" not in roster

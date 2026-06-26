@@ -351,10 +351,33 @@ class Engine:
                 self._store.put_match_state(match_id, new_rec, version)
             except Conflict:
                 continue  # a concurrent agent wrote first; reload and reapply
+            self._prune_roster(match_id, game, state)  # drop players the game removed
             if result is not None:
                 self._lazy_finalize(match_id, result, tick)
             return tick
         raise ValueError("write contention; retry")
+
+    def _prune_roster(self, match_id: str, game: Game, state: Any) -> None:
+        """Remove from the match roster any player the game has dropped (e.g. a gone
+        client). Best-effort: keeps MatchInfo.players in step with who is actually in
+        the world, so the viewer and the lobby reflect reality. Games that do not
+        implement active_players keep their full roster."""
+        active = getattr(game, "active_players", None)
+        if active is None:
+            return
+        ids = active(state)
+        loaded = self._store.get_match_meta(match_id)
+        if loaded is None:
+            return
+        info = MatchInfo.model_validate(loaded[0])
+        kept = [p for p in info.players if p.player_id in ids]
+        if len(kept) == len(info.players):
+            return
+        info.players = kept
+        try:
+            self._store.put_match_meta(match_id, info.model_dump(mode="json"), loaded[1])
+        except Conflict:
+            pass  # another writer updated meta; the next prune catches any remainder
 
     # -- helpers -----------------------------------------------------------
 
