@@ -10,9 +10,11 @@ Characters live on a grid of open cells and walls. Each occupies a cell and face
 one of four directions. You move a cell at a time, turn in 90-degree steps, and can
 only *see* forward through a narrow cone, so walls are cover and positioning is
 everything. Three hits and you are down, lying on the floor until the next round.
-A round goes to the last fighter standing; the **match** goes to the first to
-`rounds_to_win` round-wins. Eliminations score frags (the scoreboard and the
-round-win tiebreak) but no longer decide the match on their own.
+A round (a **bout**) goes to the last fighter standing. By default the match is
+**endless** (`rounds_to_win` 0): bouts cycle forever and `round_wins` is just a
+running tally, until an admin resets or ends a bout. Set `rounds_to_win` to a
+positive N to make the match end at the first to N round-wins instead. Eliminations
+score frags (the scoreboard and the round-win tiebreak) but do not decide the match.
 Two incentives keep you moving rather than camping: standing in one cell too long
 **exposes** you (your position is broadcast to every enemy, through walls, until you
 move), and each **new cell** you enter earns a sliver of score (capped, so kills
@@ -23,9 +25,9 @@ Real-time (`realtime=true`): the world runs on the wall clock, and per-character
 cooldowns gate how often you move or fire (one shot per second).
 
 - **Players**: 2-8, free-for-all. **Tick rate**: 10 Hz.
-- **Config**: `grid` (13), `seed` (omit for a fresh random maze + spawns per match; pin
-  it to reproduce an arena), `wall_density` (0.16), `rounds_to_win` (10,
-  round-wins to take the match), `score_to_win` (10, scoreboard target only; it no
+- **Config**: `grid` (20), `seed` (omit for a fresh random maze + spawns per match; pin
+  it to reproduce an arena), `wall_density` (0.16), `rounds_to_win` (0 = endless, no
+  match winner until an admin resets; set >0 for first-to-N), `score_to_win` (10, scoreboard target only; it no
   longer ends the match), `hearts` (3), `fire_range` (4), `fire_cooldown` (10 ticks =
   1s), `move_cooldown` (3 ticks), `bullet_speed` (6 cells/s), `sight` (12),
   `intermission` (20 ticks), `round_limit` (0 = off; a round ends only on
@@ -118,7 +120,8 @@ cooldowns gate how often you move or fire (one shot per second).
   game's round phase and is distinct from the state envelope's `phase`
   (`lobby`/`running`/`finished`). The top-level **`match`** block tracks match progress:
   `{round, rounds_to_win, round_wins: {name: wins}}`. `you.round_wins` is your own count.
-  The match ends when any fighter's `round_wins` reaches `rounds_to_win`.
+  With `rounds_to_win` 0 (the default) the match is endless and never ends on its own;
+  with a positive value it ends when any fighter's `round_wins` reaches it.
 - **The crumbling arena** (`collapse`, default on): each round the arena collapses from
   the outer ring inward. There is **no border wall**: a cell's **ring** is its distance
   from the grid edge (ring 0 is the outermost row/column, the index grows toward the
@@ -155,10 +158,12 @@ cooldowns gate how often you move or fire (one shot per second).
   the walls and open cells you have seen, remember where you last saw each enemy, and
   path-find toward unexplored cells or a target. Turn to scan (turning is free); the
   map you build is your situational awareness.
-- **Win**: a **round** goes to the last fighter standing (the collapse forces every
-  round to resolve); the **match** goes to the first to `rounds_to_win` (10) round-wins,
-  and the winner is the fighter with the most round-wins (`reason: "first to N round
-  wins"`). If a round ends with nobody in-round (everyone fell or died on the same tick),
+- **Win**: a **round** (bout) goes to the last fighter standing (the collapse forces
+  every round to resolve). By default (`rounds_to_win` 0) the **match is endless**: bouts
+  cycle indefinitely with no overall winner until an admin resets or draws a bout with
+  `POST .../end_round`. Set `rounds_to_win` to a positive N and the match instead goes to
+  the first to N round-wins (`reason: "first to N round wins"`). If a round ends with
+  nobody in-round (everyone fell or died on the same tick),
   the round goes to the unique highest standing (`frags + min(territory, territory_cap)`),
   or no round-win on a tie. `score_to_win` is now only a scoreboard target; frags and
   territory rank the scoreboard and break round ties but do not end the match. Downed

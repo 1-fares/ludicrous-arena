@@ -179,6 +179,54 @@ def test_match_ends_at_rounds_to_win():
     assert res.reason == "first to 1 round wins"
 
 
+def test_endless_match_never_finishes_by_default():
+    # rounds_to_win defaults to 0 = endless: no fighter ever "wins the match", however many
+    # bouts they take. round_wins keeps tallying but result() stays None, so the match runs
+    # until an admin resets it.
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "hearts": 1, "intermission": 1,
+                       "collapse": False, "drop_after": 0}, _slots(2))
+    assert st.cfg["rounds_to_win"] == 0
+    # Hand p1 a huge pile of round wins; the match still must not finish.
+    st.fighters["p1"].round_wins = 50
+    assert g.result(st) is None
+    # And bouts keep cycling: resolve a round and the next one starts (no "finished" stall).
+    st.fighters["p2"].alive = False
+    g.tick(st, 0.1)
+    assert st.phase == "intermission"
+    g.tick(st, 0.1)                       # intermission elapses (1 tick) -> next bout
+    assert st.phase == "fighting" and g.result(st) is None
+
+
+def test_admin_end_round_draws_and_continues():
+    # The admin "end current match" hook ends the bout as a draw (nobody gains a round-win)
+    # and immediately starts the next bout with everyone respawned.
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "collapse": False, "drop_after": 0}, _slots(3))
+    st.fighters["p2"].alive = False       # mid-bout: one already down
+    wins_before = {pid: f.round_wins for pid, f in st.fighters.items()}
+    round_before = st.round
+    g.end_round(st)
+    assert st.round == round_before + 1                       # advanced to the next bout
+    assert st.phase == "fighting"
+    assert all(f.alive for f in st.fighters.values())         # everyone respawned
+    assert {pid: f.round_wins for pid, f in st.fighters.items()} == wins_before   # a draw: no award
+
+
+def test_even_grid_collapses_to_a_single_centre_cell():
+    # Regression for the widened (even) default grid: the innermost ring of an even grid is
+    # a 2x2, so a ring-based core would leave four campable cells. The collapse now keeps
+    # only the single centre cell, so the floor reduces to exactly one tile and a round
+    # cannot stall on a static core.
+    g = _game()
+    st = g.init_state({"grid": 20, "seed": 1, "collapse": True, "collapse_start": 0,
+                       "ring_interval": 1, "decay_ticks": 1, "keep_rings": 0}, _slots(1))
+    e = 10_000                            # far past the whole schedule
+    void = g._void_at(st, e)
+    solid = {(x, y) for x in range(20) for y in range(20)} - void
+    assert solid == {(9, 9)}              # exactly the one centre cell survives
+
+
 def test_vision_only_forward_and_blocked_by_walls():
     g = _game()
     st = g.init_state({"grid": 11, "seed": 1, "fov_deg": 30, "sight": 12}, _slots(2))
@@ -652,7 +700,7 @@ def test_decode_state_fills_new_config_defaults():
               "decay_stages", "keep_rings", "drop_after"):
         data["cfg"].pop(k, None)
     st = g.decode_state(data)
-    assert st.cfg["rounds_to_win"] == 10
+    assert st.cfg["rounds_to_win"] == 0          # current default: endless
     assert st.cfg["collapse"] is True
     # The rules paths that read the new keys must not raise.
     g.result(st)

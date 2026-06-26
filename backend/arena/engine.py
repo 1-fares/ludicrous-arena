@@ -269,6 +269,37 @@ class Engine:
             return self.get_info(match_id)
         raise ValueError("break contention; retry")
 
+    def end_round(self, match_id: str) -> MatchInfo:
+        """Admin: force the current bout to end immediately as a draw and continue with
+        the next bout. Catches the world up to now, asks the game to end the round (a
+        no-op for games without an ``end_round`` hook), and writes the result back under
+        the usual version check. Standings carry over; only an admin reset wipes them."""
+        for _ in range(_RETRY):
+            info, _ = self._load_info(match_id)
+            game = registry.get(info.game_id)
+            if info.phase != MatchPhase.running:
+                raise ValueError("match is not running")
+            loaded = self._store.get_match_state(match_id)
+            if loaded is None:
+                raise ValueError("match has not started")
+            rec, version = loaded
+            state = game.decode_state(rec.state)
+            tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
+            if result is not None:
+                self._lazy_finalize(match_id, result, tick)
+                raise ValueError("match finished")
+            if not hasattr(game, "end_round"):
+                return self.get_info(match_id)
+            game.end_round(state)
+            new_wall = rec.last_wall_ms + round((tick - rec.last_tick) * 1000.0 / game.meta.tick_rate)
+            new_rec = StateRecord(state=game.encode_state(state), last_tick=tick, last_wall_ms=new_wall)
+            try:
+                self._store.put_match_state(match_id, new_rec, version)
+            except Conflict:
+                continue
+            return self.get_info(match_id)
+        raise ValueError("end_round contention; retry")
+
     # -- simulation core ---------------------------------------------------
 
     def _target_tick(self, game: Game, rec: StateRecord) -> int:

@@ -48,10 +48,10 @@ earns a sliver of score (`cell_bonus`, up to `territory_cap`), so a mover outran
 camper on equal kills. Kills still dominate: `score = frags + min(territory, cap)`.
 
 Config (all optional):
-    grid:            int = 13      side length
+    grid:            int = 20      side length
     seed:            int = random  maze + spawns; omit it and the server picks a fresh seed per match (layouts/spawns vary). Pin it to reproduce an arena.
     wall_density:    float = 0.16  fraction of interior cells that are cover
-    rounds_to_win:   int = 10      round-wins to take the match (first to N)
+    rounds_to_win:   int = 0       0 = endless (no match winner; bouts run until an admin resets); >0 = first to N round-wins takes the match
     score_to_win:    int = 10      scoreboard target (display only; does not end the match)
     hearts:          int = 3       hits to eliminate
     fire_range:      int = 4       cells a shot travels before fading
@@ -125,11 +125,11 @@ META = GameMeta(
     config_schema={
         "type": "object",
         "properties": {
-            "grid": {"type": "integer", "default": 13, "minimum": 5, "maximum": 40},
+            "grid": {"type": "integer", "default": 20, "minimum": 5, "maximum": 40},
             "seed": {"type": "integer", "default": 1, "description": "Maze + spawn RNG seed. Omit it (the usual case) and the server picks a fresh random seed per match, so the arena layout and starting positions differ every game; pin it only to reproduce a specific arena."},
             "wall_density": {"type": "number", "default": 0.16, "minimum": 0.0, "maximum": 0.5},
-            "rounds_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100,
-                              "description": "Round-wins needed to take the match (first to N). A round goes to the last fighter standing; the match ends when a fighter reaches this many round-wins."},
+            "rounds_to_win": {"type": "integer", "default": 0, "minimum": 0, "maximum": 100,
+                              "description": "Round-wins needed to take the match (first to N). 0 (the default) means endless: no match winner is ever declared and bouts run forever until an admin resets. A round goes to the last fighter standing; with a positive value the match ends when a fighter reaches that many round-wins."},
             "score_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100,
                              "description": "Scoreboard target for frags + capped territory. Display only: it no longer ends the match (rounds_to_win does)."},
             "hearts": {"type": "integer", "default": 3, "minimum": 1, "maximum": 20},
@@ -478,17 +478,28 @@ def _rings(state: "State") -> tuple[dict[tuple[int, int], int], int, tuple[int, 
     return rings, rings_total, (c, c)
 
 
-def _tile_status(cfg: dict[str, Any], ring: int, rings_total: int, e: int) -> tuple[str, int, Optional[int]]:
-    """Status of a floor tile in ``ring`` at round elapsed ``e``. Pure function of
-    (e, ring, config), nothing random or stored. Returns (phase, decay, falls_in):
-    phase is "solid" | "cracking" | "void"; decay is the visible crack stage
-    (0..decay_stages-1); falls_in is ticks until the tile becomes void, or None if
-    it never falls (kept core, or collapse disabled)."""
+def _core_dist(g: int, x: int, y: int) -> int:
+    """Chebyshev distance from the single centre cell ((g-1)//2 on each axis). Used to
+    decide the permanent core: with keep_rings 0 only the centre cell (core_dist 0) is
+    permanent, on even grids too (where the innermost *ring* is a 2x2, not one cell).
+    For odd grids ring + core_dist == rings_total, so a core_dist test is identical to
+    the old ring-based one; only even grids differ (they now keep one cell, not four)."""
+    c = (g - 1) // 2
+    return max(abs(x - c), abs(y - c))
+
+
+def _tile_status(cfg: dict[str, Any], ring: int, core_dist: int, rings_total: int, e: int) -> tuple[str, int, Optional[int]]:
+    """Status of a floor tile whose distance-from-edge is ``ring`` and distance-from-centre
+    is ``core_dist`` at round elapsed ``e``. Pure function of (e, ring, core_dist, config),
+    nothing random or stored. Returns (phase, decay, falls_in): phase is "solid" |
+    "cracking" | "void"; decay is the visible crack stage (0..decay_stages-1); falls_in is
+    ticks until the tile becomes void, or None if it never falls (permanent core, or
+    collapse disabled). The fall *time* depends on ``ring`` (outer falls first); whether a
+    tile is permanent depends on ``core_dist`` (a single centre cell plus keep_rings)."""
     if not cfg.get("collapse", True):
         return "solid", 0, None
-    keep_from = rings_total - cfg["keep_rings"]
-    if ring >= keep_from:
-        return "solid", 0, None          # innermost kept core: solid forever
+    if core_dist <= cfg["keep_rings"]:
+        return "solid", 0, None          # permanent core: the centre cell (+ keep_rings) never falls
     begin = cfg["collapse_start"] + ring * cfg["ring_interval"]
     fall = begin + cfg["decay_ticks"]
     if e < begin:
@@ -597,7 +608,7 @@ class Skirmish:
         for x in range(g):
             for y in range(g):
                 r = min(x, g - 1 - x, y, g - 1 - y)
-                if _tile_status(cfg, r, rings_total, e)[0] == "void":
+                if _tile_status(cfg, r, _core_dist(g, x, y), rings_total, e)[0] == "void":
                     out.add((x, y))
         return out
 
@@ -784,7 +795,11 @@ class Skirmish:
         # intermission
         state.inter_cd -= 1
         if state.inter_cd <= 0:
-            if max((f.round_wins for f in state.fighters.values()), default=0) >= cfg["rounds_to_win"]:
+            # In bounded mode, once a fighter has reached the target leave the match in
+            # intermission for result() to finish. In endless mode (rounds_to_win 0) this
+            # never triggers, so bouts keep cycling forever.
+            n = cfg["rounds_to_win"]
+            if n > 0 and max((f.round_wins for f in state.fighters.values()), default=0) >= n:
                 return  # leave finished; result() ends the match
             self._new_round(state)
 
@@ -826,6 +841,13 @@ class Skirmish:
         state.round = nxt
         state.phase = "fighting"
         state.round_start = state.tick
+
+    def end_round(self, state: State) -> None:
+        """Admin: end the current bout immediately as a draw (no round-win awarded) and
+        start the next one. Used to unstick a stalemate where survivors never engage:
+        everyone is respawned and play continues from a fresh bout, standings unchanged."""
+        state.bullets = []
+        self._new_round(state)   # respawn all, advance the round, award nobody (a draw)
 
     # -- views -------------------------------------------------------------
 
@@ -879,7 +901,7 @@ class Skirmish:
                 if not self._sees(walls, f.x, f.y, cx, cy):
                     continue               # behind a standing wall (void does not occlude)
                 phase, decay, falls_in = _tile_status(
-                    cfg, min(cx, g - 1 - cx, cy, g - 1 - cy), rings_total, e)
+                    cfg, min(cx, g - 1 - cx, cy, g - 1 - cy), _core_dist(g, cx, cy), rings_total, e)
                 if (cx, cy) in walls:      # standing wall: blocks, and may be cracking
                     cells.append({"forward": d, "right": r, "x": cx, "y": cy, "what": "wall",
                                   "decay": decay, "falls_in": falls_in})
@@ -938,7 +960,7 @@ class Skirmish:
         # time. falls_in counts down even while the tile still looks solid; once it
         # reaches 0 the tile becomes void and you fall (out for the round).
         own_ring = min(f.x, state.grid - 1 - f.x, f.y, state.grid - 1 - f.y)
-        g_state, g_decay, g_falls = _tile_status(cfg, own_ring, rings_total, e)
+        g_state, g_decay, g_falls = _tile_status(cfg, own_ring, _core_dist(state.grid, f.x, f.y), rings_total, e)
         ground = {"state": g_state, "decay": g_decay, "falls_in": g_falls}
         next_fall_tick = (state.round_start + cfg["collapse_start"]
                           + safe_ring * cfg["ring_interval"] + cfg["decay_ticks"]) \
@@ -990,7 +1012,7 @@ class Skirmish:
         for x in range(g):
             for y in range(g):
                 phase, decay, falls_in = _tile_status(
-                    cfg, min(x, g - 1 - x, y, g - 1 - y), rings_total, e)
+                    cfg, min(x, g - 1 - x, y, g - 1 - y), _core_dist(g, x, y), rings_total, e)
                 if phase == "void":
                     void.append([x, y])                       # every hole, floor or wall
                 elif (x, y) in wallset:
@@ -1029,6 +1051,11 @@ class Skirmish:
         cfg = state.cfg
         scores = {f.name: round(_points(f, cfg), 2) for f in state.fighters.values()}
         n = cfg["rounds_to_win"]
+        # Endless mode (n == 0, the default): the match never finishes on its own. Bouts
+        # cycle forever and round_wins is only a running tally; only an admin reset ends it.
+        # The engine bounds per-read catch-up itself, so no time cap is needed here.
+        if n <= 0:
+            return None
         # First to N round-wins takes the match. Out (fallen) is round-scoped now, so it
         # is not a winner filter; round_wins decides outright. round_wins only changes
         # when a round resolves, so the match ends the instant a fighter reaches N.
@@ -1037,7 +1064,7 @@ class Skirmish:
             winners = [pid for pid, f in state.fighters.items() if f.round_wins == best]
             return MatchResult(finished_tick=state.tick, winners=winners, scores=scores,
                                reason=f"first to {n} round wins")
-        # Safety cap so a stalled match cannot run forever: award to the round-win
+        # Safety cap so a stalled bounded match cannot run forever: award to the round-win
         # leader(s); a 0-0 stall has no winner.
         if state.tick >= n * 6000:
             winners = [pid for pid, f in state.fighters.items()

@@ -161,6 +161,25 @@ def test_reset_unknown_match_404(client):
     assert client.post("/v1/matches/nope/reset", headers=_admin_headers()).status_code == 404
 
 
+def test_end_round_is_admin_only_and_advances_a_bout(client):
+    mid = client.post("/v1/matches",
+                      json={"game_id": "skirmish", "config": {"grid": 11}, "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H2)
+    client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
+
+    assert client.post(f"/v1/matches/{mid}/end_round").status_code == 401          # no token
+    assert client.post(f"/v1/matches/{mid}/end_round", headers=H2).status_code == 403  # non-admin
+    before = client.get(f"/v1/matches/{mid}").json()["tick"]
+    NOW[0] += 0.5
+    r = client.post(f"/v1/matches/{mid}/end_round", headers=_admin_headers())       # admin
+    assert r.status_code == 200 and r.json()["phase"] == "running"
+    # The bout advanced (a fresh round started); the match is still running, not finished.
+    body = client.get(f"/v1/matches/{mid}/scene").json()
+    assert body["phase"] == "running"
+
+
 def test_create_match_is_admin_only(client):
     # Agents join, they do not create. A non-admin player is rejected; admin allowed.
     assert client.post("/v1/matches", json={"game_id": "skirmish"}, headers=H2).status_code == 403

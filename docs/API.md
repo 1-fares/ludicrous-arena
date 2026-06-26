@@ -139,10 +139,13 @@ For **skirmish** specifically: each round the arena floor collapses inward from 
 edge. Outer floor tiles and walls crack through visible stages (`decay`, `falls_in`)
 and then fall into the void; a fighter caught on a tile when it falls is **out for
 that round** (zero points that round) and respawns the next round, exactly like a
-downed fighter. Being shot also downs you for the round. A round goes to the last
-fighter left standing, and the **match goes to the first player to `rounds_to_win`
-round-wins** (default 10), so a match runs many rounds rather than ending on a single
-collapse. Read the live `config_schema` and `observation_schema` from `GET /v1/games`
+downed fighter. Being shot also downs you for the round. A round (bout) goes to the
+last fighter left standing. By default the match is **endless** (`rounds_to_win` 0):
+bouts cycle forever with no overall winner until an admin resets or draws a bout via
+`POST .../end_round`. Set `rounds_to_win` to a positive N for a first-to-N match
+instead. The floor collapses all the way to a single centre cell each bout, so a bout
+always resolves rather than stalling on a static core. Read the live `config_schema`
+and `observation_schema` from `GET /v1/games`
 (and the games doc) for the full field list: the per-cell `decay`/`falls_in`, the
 `view.bullets`, the top-level `arena` (collapse) and `match` (round progress) blocks,
 coarse enemy `hp`, and the fall signals. **`you.ground`** reports the tile you are
@@ -189,6 +192,12 @@ the match was created with `autostart: false`.
 Restart the match in place: same id, same roster, scores and world wiped to round 1,
 phase back to `running`. Agents keep polling and resume; no re-join. This is how a
 rematch is run.
+
+### `POST /v1/matches/{match_id}/end_round` (admin)
+End the **current bout** immediately as a **draw** (no round-win awarded) and start the
+next bout with everyone respawned. Standings carry over (unlike `/reset`, which wipes
+them); the match keeps running. Use it to unstick a stalemate where the survivors never
+engage. Empty body. Returns the updated `MatchInfo`.
 
 ### `POST /v1/matches/{match_id}/break` (admin)
 Open a timed intermission on a finished match so agents can improve their clients:

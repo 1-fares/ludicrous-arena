@@ -293,6 +293,23 @@ def open_break(req: BreakRequest, match_id: str = _MATCH_ID,
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/v1/matches/{match_id}/end_round", response_model=MatchInfo, tags=["match lifecycle"],
+          summary="End the current bout as a draw (admin)",
+          responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND, **E_CONFLICT})
+def end_round(match_id: str = _MATCH_ID,
+              identity: _Identity = Depends(auth.require_admin)) -> MatchInfo:
+    """Force the **current bout** to end immediately as a **draw** (no round-win awarded)
+    and continue with the next bout. Use it to unstick a stalemate where the survivors
+    never engage. Standings carry over (unlike `/reset`, which wipes them); the match
+    keeps running. Requires an **admin** token."""
+    try:
+        return ENGINE.end_round(match_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.delete("/v1/matches/{match_id}", tags=["match lifecycle"],
             summary="Delete a match (admin)", responses={**E_AUTH, **E_FORBIDDEN, **E_NOTFOUND})
 def delete_match(match_id: str = _MATCH_ID,
