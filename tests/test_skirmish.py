@@ -73,6 +73,41 @@ def test_shot_takes_a_heart_and_three_eliminate():
     assert not p2.alive
 
 
+def test_bullets_and_last_hit_are_observable():
+    # A bullet in flight is visible to the target (so it can dodge), and a hit
+    # records the bearing it came from. p1 at (3,5) facing East fires at p2 at (5,5).
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "hearts": 3, "fire_range": 6}, _slots(2))
+    st.walls = [w for w in st.walls if not (w[1] == 5 and 3 <= w[0] <= 6)]
+    p1, p2 = st.fighters["p1"], st.fighters["p2"]
+    p1.x, p1.y, p1.facing = 3, 5, 1
+    p2.x, p2.y, p2.facing = 5, 5, 1   # p2 also faces East, so the shot comes from behind
+    g.apply(st, "p1", {"type": "fire"})
+    g.tick(st, 0.1)
+    # p2 sees the in-flight bullet even though it is travelling toward p2 from behind.
+    bullets = g.observe(st, "p2")["view"]["bullets"]
+    assert bullets and all({"x", "y", "dx", "dy"} <= set(b) for b in bullets)
+    for _ in range(8):                # let it land
+        g.tick(st, 0.1)
+    hit = g.observe(st, "p2")["you"]["last_hit"]
+    assert hit is not None and hit["dir"] == "E" and hit["from"] == "behind"
+
+
+def test_fire_and_move_cooldowns_are_independent():
+    # Shoot-and-scoot: firing is allowed while the move cooldown is active (and vice
+    # versa). can_fire tracks only the gun, so it stays True during a move cooldown.
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "move_cooldown": 3}, _slots(2))
+    f = st.fighters["p1"]
+    f.x, f.y, f.facing = 5, 5, 1
+    f.fire_cd = 0
+    g.apply(st, "p1", {"type": "move", "dir": "forward"})   # starts the move cooldown
+    assert f.move_cd > 0 and f.fire_cd == 0
+    you = g.observe(st, "p1")["you"]
+    assert you["can_move"] is False and you["can_fire"] is True
+    assert g.validate(st, "p1", {"type": "fire"}) is None   # firing mid-move is allowed
+
+
 def test_round_resets_and_respawns_without_scoring():
     # Surviving a round is worth nothing; only kills score. The round still resets
     # so the downed fighter respawns and the hunt continues.

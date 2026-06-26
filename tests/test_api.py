@@ -63,7 +63,7 @@ def test_full_match_flow(client):
 
     body = client.get(f"/v1/matches/{mid}/state", headers=H1).json()
     assert body["tick"] == 5
-    assert body["you"]["player_id"] == "p1"
+    assert body["seat"]["player_id"] == "p1"
     assert "players" in body["observation"]
 
     # Spectator scene is public and shows the same world.
@@ -92,9 +92,13 @@ def test_skirmish_full_flow(client):
 
     NOW[0] += 0.5  # skirmish is realtime; advance the wall clock
     body = client.get(f"/v1/matches/{mid}/state", headers=H1).json()
-    assert body["you"]["player_id"] == "p1"
+    assert body["seat"]["player_id"] == "p1"
     obs = body["observation"]
     assert "you" in obs and "view" in obs and obs["round"] == 1
+    # Resolved config is surfaced on the match object (not just the {grid:9} override),
+    # so an agent can size its map without guessing the schema defaults.
+    cfg = client.get(f"/v1/matches/{mid}").json()["config"]
+    assert cfg["grid"] == 9 and cfg["fire_range"] == 4 and cfg["hearts"] == 3
 
     r = client.post(f"/v1/matches/{mid}/actions",
                     json={"actions": [{"type": "turn", "to": "left"}, {"type": "fire"}]}, headers=H1)

@@ -92,10 +92,12 @@ and `dev-token-2` .. `dev-token-4` for multi-agent play.
 3. Wait until the match `phase` is `running` by polling the public
    `GET /v1/matches/{id}` (your private `/state` returns 409 until the match starts).
 4. Loop: `GET /v1/matches/{id}/state` -> decide -> `POST /v1/matches/{id}/actions`,
-   about once per tick. `state.you.player_id` is your id, `state.you.rejected` tells
+   about once per tick. `state.seat.player_id` is your id, `state.seat.rejected` tells
    you why an action was dropped, and `state.observation` has the shape of that
-   game's `observation_schema`.
-5. Stop when `state.phase` is `finished`; `state.result` holds the winners.
+   game's `observation_schema`. Note: `state.seat` (your identity) is distinct from
+   `state.observation.you` (your in-world pose); they are different objects.
+5. Stop when `state.phase` is `finished` (not when `result` appears: it is null until
+   then); `state.result` then holds `winners`, `winner_names`, and `scores`.
 
 The world is advanced *on demand* when you read or act, so polling always returns
 the world as of now. A reference client is in `examples/python-agent/`. The whole
@@ -212,7 +214,7 @@ def get_match(match_id: str = _MATCH_ID) -> MatchInfo:
 def join_match(req: JoinMatchRequest, match_id: str = _MATCH_ID,
                identity: _Identity = Depends(auth.require_identity)) -> MatchInfo:
     """Claim a slot in a match that is still in `lobby`. Idempotent for the same
-    token (you keep your slot). After it starts, read `you.player_id` from
+    token (you keep your slot). After it starts, read `seat.player_id` from
     `GET .../state` to learn your match-local id."""
     try:
         return ENGINE.join_match(match_id, identity.user_id,
@@ -294,8 +296,8 @@ def get_state(match_id: str = _MATCH_ID,
               identity: _Identity = Depends(auth.require_identity)) -> dict[str, Any]:
     """Your private, possibly partial (fog-of-war) view of the match, projected to
     now. Poll this at roughly the game's `tick_rate`. `observation` is
-    game-specific; `you.rejected` explains dropped actions; `result` appears once
-    the match is finished."""
+    game-specific; `seat.rejected` explains dropped actions; `result` appears once
+    the match is finished (detect the end by `phase == 'finished'`)."""
     try:
         return ENGINE.agent_view(match_id, identity.user_id)
     except KeyError as e:
@@ -323,8 +325,9 @@ def get_scene(match_id: str = _MATCH_ID) -> dict[str, Any]:
 def submit_actions(req: ActionRequest, match_id: str = _MATCH_ID,
                    identity: _Identity = Depends(auth.require_identity)) -> dict[str, Any]:
     """Submit one or more game-specific actions, applied in order at the next tick.
-    Illegal actions are dropped silently and surfaced under `you.rejected` on your
-    next `state` read. See the game's `action_schema` (GET /v1/games) for shapes."""
+    Illegal actions are dropped silently and surfaced under `seat.rejected` on your
+    next `state` read. All actions in the list apply in submitted order in one tick.
+    See the game's `action_schema` (GET /v1/games) for shapes."""
     try:
         tick = ENGINE.submit_actions(match_id, identity.user_id, req.actions)
     except KeyError as e:

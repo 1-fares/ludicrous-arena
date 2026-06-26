@@ -43,7 +43,9 @@ cooldowns gate how often you move or fire (one shot per second).
   {
     "you": {"x": 3, "y": 5, "facing": "E", "hearts": 3, "alive": true,
             "can_move": true, "can_fire": true,
-            "score": 1.35, "frags": 1, "territory": 0.35, "exposed": false},
+            "score": 1.35, "frags": 1, "territory": 0.35, "exposed": false,
+            "camp_ticks": 4, "expose_at": 30,
+            "last_hit": {"tick": 39, "dir": "W", "from": "behind"}},
     "view": {
       "cells": [
         {"forward": 1, "right": 0, "x": 4, "y": 5, "what": "empty"},
@@ -51,6 +53,7 @@ cooldowns gate how often you move or fire (one shot per second).
         {"forward": 2, "right": 0, "x": 5, "y": 5, "what": "enemy", "name": "Vega"}
       ],
       "enemies": [{"name": "Vega", "forward": 2, "right": 0, "distance": 2.0, "bearing": "ahead"}],
+      "bullets": [{"x": 7.4, "y": 5.0, "dx": -1.0, "dy": 0.0}],
       "pinged": [{"name": "Nox", "x": 9, "y": 2}],
       "wall_ahead": 4, "forward_clear": true
     },
@@ -60,13 +63,31 @@ cooldowns gate how often you move or fire (one shot per second).
   You see an **expanding cone** ahead: at forward distance `d` you see the row of
   `2d+1` cells (3 immediately ahead, then 5, then 7, ...) out to `sight`, minus any
   cell hidden behind a wall. Coordinates are relative to your facing: `forward`
-  (cells ahead) and `right` (negative is to your left). `cells[].what` is `wall`,
-  `empty`, or `enemy` (with `name`). `enemies` is the visible enemies broken out for
-  convenience; an enemy at `right == 0` within `fire_range` is a guaranteed hit.
-  `view.pinged` lists **exposed** enemies (idle too long), revealed to you regardless
-  of walls or your cone, so go hunt them; `you.exposed` warns you that you are the one
-  lit up. `you.score` is `frags + min(territory, territory_cap)`. `phase` is `fighting`
-  or `intermission` (between rounds).
+  (cells ahead) and `right` (negative is to your left).
+  - **`cells` is the canonical world view**: every visible cell with its `what`
+    (`wall`, `empty`, or `enemy` with `name`). `enemies` is just the `enemy` cells
+    broken out and sorted by distance for convenience; an enemy at `right == 0`
+    within `fire_range` is a guaranteed hit. `pinged` is a separate channel (it is
+    not in `cells`). Read `cells` plus `pinged`; treat `enemies` as a shortcut.
+  - **`bullets`** are the in-flight shots within `sight`, given as absolute position
+    `(x, y)` (fractional, mid-cell) and unit velocity `(dx, dy)`. They are **not**
+    cone-gated or wall-occluded: you see a shot coming from behind or beside you, so
+    dodging is possible. Empty while you are down.
+  - **`pinged`** lists **exposed** enemies (idle too long), revealed to you regardless
+    of walls or your cone, so go hunt them. **Exposure mechanic**: stand in the same
+    cell for `expose_at` (= `expose_ticks`) ticks and you become `exposed`; your
+    position is then broadcast into every other player's `pinged` until you move.
+    `you.camp_ticks` counts ticks in your current cell (resets to 0 when you move) and
+    `you.exposed` warns you that you are the one lit up.
+  - **`last_hit`** (`{tick, dir, from}` or `null`, cleared on respawn) is the only cue
+    for fire from **outside** your cone: `dir` is the bullet's absolute travel
+    direction, `from` is the shooter's bearing relative to your facing
+    (`ahead`/`right`/`behind`/`left`). React to it.
+  - `can_move` and `can_fire` are **independent** cooldowns: you may fire while the
+    move cooldown is active (shoot-and-scoot) and move while the gun reloads.
+  `you.score` is `frags + min(territory, territory_cap)`. The inner `phase` is
+  `fighting` or `intermission` (between rounds); it is the game's round phase and is
+  distinct from the state envelope's `phase` (`lobby`/`running`/`finished`).
 - **Navigating (important)**: you cannot see behind you and get **no overhead map**.
   Each observation is only the forward cone, so a purely reactive agent wanders and
   stalls. Every visible cell carries its absolute `x, y`, so the intended approach

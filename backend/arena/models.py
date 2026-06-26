@@ -64,10 +64,13 @@ class PlayerSlot(BaseModel):
 
 class MatchResult(BaseModel):
     """Terminal outcome of a match. Present once `phase` is `finished`. Note the
-    keying: `winners` holds `player_id`s, while `scores` is keyed by display name."""
+    keying: `winners` holds `player_id`s, `scores` is keyed by display name, and
+    `winner_names` gives the winners' display names so you do not have to map
+    `player_id` to name yourself."""
 
     finished_tick: int = Field(description="Tick at which the match ended.")
     winners: list[str] = Field(default_factory=list, description="Winning `player_id`s (or team names for team games).", examples=[["p3"]])
+    winner_names: list[str] = Field(default_factory=list, description="Display names of the winners, parallel to `winners`. For team games these are the team names.", examples=[["Hunter"]])
     scores: dict[str, float] = Field(default_factory=dict, description="Final score per display name (or team).", examples=[{"Hunter": 10.0, "Vega": 7.0}])
     reason: str = Field(default="", description="Why the match ended.", examples=["reached the score limit"])
 
@@ -85,6 +88,7 @@ class MatchInfo(BaseModel):
     max_players: int = Field(default=8, description="Maximum players the match accepts.")
     created_at: str = Field(description="ISO-8601 creation time (UTC).", examples=["2026-06-25T13:00:00Z"])
     room: Optional[str] = Field(default=None, description="Stable room name this match belongs to, if created as a named room (its id is then deterministic and reused).")
+    generation: int = Field(default=0, description="Reset counter for this match id. Starts at 0 and increments on every reset, so an agent polling a reused room can detect a reset (same id, higher generation) without an out-of-band signal.")
     result: Optional[MatchResult] = Field(default=None, description="Terminal result, or null until finished.")
     break_until: Optional[float] = Field(default=None, description="Epoch seconds until which the match is on an intermission break (agents may improve their clients); null when not on break.")
     break_note: Optional[str] = Field(default=None, description="Optional message shown during the break, e.g. what to work on.")
@@ -136,12 +140,14 @@ class HealthResponse(BaseModel):
     games: list[str] = Field(description="IDs of the registered game types.", examples=[["skirmish", "deathmatch", "lockdown", "trading_desk"]])
 
 
-class YouBlock(BaseModel):
-    """Who you are in the match, plus feedback on your last submission."""
+class SeatBlock(BaseModel):
+    """Who you are in the match, plus feedback on your last submission. This is the
+    top-level `seat` of a state response; it is distinct from the game-specific
+    `observation.you` (your in-world pose), which has a different shape."""
 
     player_id: str = Field(description="Your match-local id.", examples=["p1"])
     team: Optional[str] = Field(default=None, description="Your team, or null for free-for-all.")
-    rejected: list[str] = Field(default_factory=list, description="Reasons any actions from your previous submission were rejected (e.g. on cooldown, blocked by a wall).", examples=[["gun is reloading"]])
+    rejected: list[str] = Field(default_factory=list, description="Reasons the engine refused any actions from your previous submission (e.g. on cooldown, blocked by a wall). Reflects the prior tick; empty when nothing was refused.", examples=[["gun is reloading"]])
 
 
 class StateResponse(BaseModel):
@@ -150,8 +156,8 @@ class StateResponse(BaseModel):
 
     match_id: str
     tick: int = Field(description="Current simulation tick.")
-    phase: MatchPhase
-    you: YouBlock
+    phase: MatchPhase = Field(description="Envelope phase: `lobby`, `running`, or `finished`. Detect the end by `phase == 'finished'` (NOT by the presence of `result`, which is null until then). Distinct from any inner `observation.phase` a game may report.")
+    seat: SeatBlock = Field(description="Your identity in the match and feedback on your last submission. Distinct from `observation.you`.")
     observation: dict[str, Any] = Field(description="Game-specific observation, often partial (fog of war). For its exact shape see that game's `observation_schema` from GET /v1/games.")
     result: Optional[MatchResult] = Field(default=None, description="Present once the match is finished, so you can detect your own outcome.")
 

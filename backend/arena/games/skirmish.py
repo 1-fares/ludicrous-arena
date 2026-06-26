@@ -23,12 +23,19 @@ Observation (forward vision only): you see an expanding cone ahead. At forward
 distance d you see the row of 2d+1 cells (3 immediately ahead, then 5, then 7, ...)
 out to `sight`, minus any cell hidden behind a wall. Coordinates are relative to
 where you face: `forward` (1..sight) and `right` (negative is left).
-    you:  {x, y, facing, hearts, alive, can_move, can_fire, score, frags, territory, exposed}
+    you:  {x, y, facing, hearts, alive, can_move, can_fire, score, frags, territory,
+           exposed, camp_ticks, expose_at, last_hit}
     view: {cells: [{forward, right, x, y, what: wall|empty|enemy, name?}],
            enemies: [{name, forward, right, distance, bearing}],
+           bullets: [{x, y, dx, dy}],       # in-flight shots within sight, even from behind
            pinged: [{name, x, y}],          # exposed campers, revealed through walls
            wall_ahead, forward_clear}
     round, phase, scores
+
+`can_move` and `can_fire` are independent cooldowns: you may fire while the move
+cooldown is active (shoot-and-scoot) and move while the gun is reloading. `camp_ticks`
+counts ticks in the current cell; at `expose_at` you become `exposed`. `last_hit`
+({tick, dir, from}) is the only cue for fire from outside the cone.
 
 Two incentives push you to keep moving and hunting rather than camp. Standing in one
 cell for `expose_ticks` makes you **exposed**: your position is broadcast to every
@@ -69,6 +76,15 @@ from arena.registry import register
 # Facing: 0=N 1=E 2=S 3=W. Grid y grows "south" (down). Movement is along these.
 DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 DIR_NAMES = ["N", "E", "S", "W"]
+# Bearing of a direction relative to where you face (index = (abs_dir - facing) % 4).
+REL_NAMES = ["ahead", "right", "behind", "left"]
+
+
+def _dir_index(dx: float, dy: float) -> int:
+    """Index into DIRS for an axis-aligned unit vector (bullets travel on an axis)."""
+    key = (1 if dx > 0.5 else (-1 if dx < -0.5 else 0),
+           1 if dy > 0.5 else (-1 if dy < -0.5 else 0))
+    return DIRS.index(key) if key in DIRS else 0
 
 META = GameMeta(
     id="skirmish",
@@ -130,11 +146,18 @@ META = GameMeta(
                     "hearts": {"type": "integer", "description": "Hits remaining before elimination."},
                     "alive": {"type": "boolean"},
                     "can_move": {"type": "boolean", "description": "False while the move cooldown is active."},
-                    "can_fire": {"type": "boolean", "description": "False while the gun is reloading."},
+                    "can_fire": {"type": "boolean", "description": "False while the gun is reloading. Independent of can_move: you may fire while the move cooldown is active (shoot-and-scoot), and move while the gun is reloading."},
                     "score": {"type": "number", "description": "Your standing: frags + capped territory."},
                     "frags": {"type": "integer", "description": "Eliminations you have scored."},
                     "territory": {"type": "number", "description": "Points earned from new ground (capped by territory_cap)."},
                     "exposed": {"type": "boolean", "description": "You have stayed put too long: your position is now broadcast to every enemy until you move."},
+                    "camp_ticks": {"type": "integer", "description": "Ticks you have stayed in the current cell. Reaching expose_at flips exposed to true; moving resets it to 0."},
+                    "expose_at": {"type": "integer", "description": "The camp_ticks value at which you become exposed (the expose_ticks config). 0 means exposure is disabled."},
+                    "last_hit": {"type": ["object", "null"], "description": "The most recent hit you took this round, or null. Cleared on respawn.",
+                                 "properties": {
+                                     "tick": {"type": "integer", "description": "Tick the hit landed."},
+                                     "dir": {"enum": ["N", "E", "S", "W"], "description": "Absolute direction the bullet was travelling."},
+                                     "from": {"enum": ["ahead", "right", "behind", "left"], "description": "Bearing of the shooter relative to your facing."}}},
                 },
             },
             "view": {
@@ -172,6 +195,15 @@ META = GameMeta(
                     },
                     "wall_ahead": {"type": "integer", "description": "Clear cells straight ahead until a wall."},
                     "forward_clear": {"type": "boolean", "description": "True if the cell directly ahead is open."},
+                    "bullets": {
+                        "type": "array",
+                        "description": "In-flight projectiles within sight, including from behind or beside you (not cone-gated and not occluded), so you can dodge. Empty while you are down.",
+                        "items": {"type": "object", "properties": {
+                            "x": {"type": "number", "description": "Absolute column (fractional; bullets move between cells)."},
+                            "y": {"type": "number", "description": "Absolute row."},
+                            "dx": {"type": "number", "description": "Unit velocity in x (the axis the bullet travels)."},
+                            "dy": {"type": "number", "description": "Unit velocity in y."}}},
+                    },
                     "pinged": {
                         "type": "array",
                         "description": "Exposed enemies (idle too long), revealed to everyone regardless of walls or your cone. Hunt them.",
@@ -183,8 +215,8 @@ META = GameMeta(
             },
             "round": {"type": "integer"},
             "phase": {"enum": ["fighting", "intermission"]},
-            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name.",
-                       "additionalProperties": {"type": "integer"}},
+            "scores": {"type": "object", "description": "Standing (frags + capped territory) per display name. Values are numbers: territory adds a fractional bonus.",
+                       "additionalProperties": {"type": "number"}},
         },
     },
 )
@@ -208,6 +240,7 @@ class Fighter:
     py: int = -1
     visited: list = field(default_factory=list)   # [[x,y], ...] cells already scored for territory
     last_act: int = 0            # tick of the last submitted action; stale => client gone (dropped)
+    last_hit: Optional[dict] = None  # most recent hit this round: {tick, dir, from}, or None
 
 
 @dataclass
@@ -489,6 +522,13 @@ class Skirmish:
                     continue
                 if (f.x, f.y) == cell:
                     f.hearts -= 1
+                    # Record where the shot came from so the victim can react: dir is
+                    # the bullet's absolute travel direction; from is the source's
+                    # bearing relative to the victim's facing (it came from behind the
+                    # travel direction). This is the only cue for fire outside the cone.
+                    tdir = _dir_index(b.dx, b.dy)
+                    f.last_hit = {"tick": state.tick, "dir": DIR_NAMES[tdir],
+                                  "from": REL_NAMES[((tdir + 2) - f.facing) % 4]}
                     if f.hearts <= 0:
                         f.alive = False
                         killer = state.fighters.get(b.owner)
@@ -532,6 +572,7 @@ class Skirmish:
             f.alive = True
             f.move_cd = f.fire_cd = 0
             f.idle, f.exposed, f.px, f.py = 0, False, sx, sy   # frags/terr persist across rounds
+            f.last_hit = None                                  # a new round clears stale damage cues
             f.last_act = state.tick                            # fresh drop grace each round
         state.bullets = []
         state.round += 1
@@ -610,11 +651,23 @@ class Skirmish:
         view["pinged"] = [{"name": e.name, "x": e.x, "y": e.y}
                           for pid, e in state.fighters.items()
                           if pid != player_id and e.alive and e.exposed]
+        # In-flight bullets within sight, including from behind or beside you (not
+        # cone-gated, not occluded), so dodging is possible. Dead fighters see none.
+        sight = cfg["sight"]
+        view["bullets"] = ([{"x": round(b.x, 2), "y": round(b.y, 2),
+                             "dx": round(b.dx, 2), "dy": round(b.dy, 2)}
+                            for b in state.bullets
+                            if math.hypot(b.x - f.x, b.y - f.y) <= sight] if f.alive else [])
         return {
+            # The move and fire cooldowns are independent: you can fire while the move
+            # cooldown is active (shoot-and-scoot) and vice versa, so can_fire tracks
+            # only the gun's own cooldown.
             "you": {"x": f.x, "y": f.y, "facing": DIR_NAMES[f.facing], "hearts": f.hearts,
                     "alive": f.alive, "can_move": f.move_cd == 0, "can_fire": f.fire_cd == 0,
                     "score": round(_points(f, cfg), 2), "frags": f.frags,
-                    "territory": round(f.terr, 2), "exposed": f.exposed},
+                    "territory": round(f.terr, 2), "exposed": f.exposed,
+                    "camp_ticks": f.idle, "expose_at": cfg["expose_ticks"],
+                    "last_hit": f.last_hit},
             "view": view,
             "round": state.round,
             "phase": state.phase,

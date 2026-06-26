@@ -34,7 +34,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 from arena import registry
-from arena.config import validate_config
+from arena.config import merge_defaults, validate_config
 from arena.game import Game
 from arena.models import MatchInfo, MatchPhase, MatchResult, PlayerSlot
 from arena.store import Conflict, StateRecord, Store
@@ -79,6 +79,11 @@ class Engine:
                      room: Optional[str] = None) -> MatchInfo:
         game = registry.get(game_id)
         validate_config(game.meta, config)  # reject out-of-range config before it can hang/crash a start
+        # Store the fully resolved config (defaults merged with the overrides), not
+        # just the overridden keys, so an agent can read the real grid/fire_range/etc
+        # off the match object instead of guessing the schema defaults. init_state
+        # merges defaults again, which is idempotent on an already-resolved config.
+        config = merge_defaults(game.meta, config)
         if room:
             # Named room: a stable, deterministic id reused across a whole session.
             match_id = "room-" + hashlib.sha256(room.encode()).hexdigest()[:10]
@@ -209,6 +214,7 @@ class Engine:
             info.phase = MatchPhase.running
             info.result = None
             info.tick = 0
+            info.generation += 1   # signal the reset to agents polling the same id
             info.break_until = None
             info.break_note = None
             try:
@@ -278,6 +284,13 @@ class Engine:
         if info.phase == MatchPhase.lobby:
             # The lobby board is a static preview; the simulation has not begun.
             return game, info, state, rec.last_tick, None, rec, version
+        if info.phase == MatchPhase.finished:
+            # The match is over. Return the stored terminal result and the frozen
+            # state without re-simulating: a fresh projection from the persisted
+            # seed (which excludes the actions that actually decided the game) could
+            # otherwise reach a different winner than the one in /v1/matches. The
+            # stored result is the single source of truth once finished.
+            return game, info, state, info.tick, info.result, rec, version
         tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
         return game, info, state, tick, result, rec, version
 
@@ -297,7 +310,7 @@ class Engine:
             "match_id": match_id,
             "tick": tick,
             "phase": (MatchPhase.finished if result else info.phase).value,
-            "you": {
+            "seat": {
                 "player_id": slot.player_id,
                 "team": slot.team,
                 "rejected": (rec.rejected.get(slot.player_id, []) if rec else []),
@@ -416,6 +429,12 @@ class Engine:
         meta = MatchInfo.model_validate(loaded[0])
         if meta.phase == MatchPhase.finished:
             return
+        # Fill in the winners' display names from the roster so a client can map a
+        # winning player_id to a name without a second lookup. Mutating in place also
+        # gives the calling read/action the enriched result for its own response.
+        if not result.winner_names:
+            by_pid = {p.player_id: p.display_name for p in meta.players}
+            result.winner_names = [by_pid.get(w, w) for w in result.winners]
         meta.phase = MatchPhase.finished
         meta.tick = tick
         meta.result = result

@@ -54,10 +54,21 @@ def test_kill_scores_and_finishes():
     scene = eng.scene_view(mid)
     assert scene["phase"] == "finished"
     assert scene["result"]["winners"] == ["p1"]
+    # The result carries the winner's display name, so a client need not map ids.
+    assert scene["result"]["winner_names"] == ["A"]
 
     # The terminal record was persisted (lazy finalize), so metadata agrees and a
     # further action is rejected.
-    assert eng.get_info(mid).phase.value == "finished"
+    info = eng.get_info(mid)
+    assert info.phase.value == "finished"
+    # Reads of a finished match return the stored result verbatim and do not advance
+    # the sim, so /state and /v1/matches cannot disagree on the winner even as the
+    # clock keeps moving.
+    assert info.result.winners == ["p1"] and info.result.winner_names == ["A"]
+    now[0] += 50.0
+    assert eng.scene_view(mid)["result"]["winners"] == info.result.winners
+    assert eng.agent_view(mid, "u1")["result"]["winners"] == info.result.winners
+    assert eng.scene_view(mid)["tick"] == info.tick  # frozen, not re-projected
     try:
         eng.submit_actions(mid, "u2", [{"type": "move", "dx": 1, "dy": 0}])
         assert False, "expected finished match to reject actions"
@@ -73,7 +84,7 @@ def test_non_finite_action_is_rejected_not_crashing():
     # rejected and the reason surfaces on the agent's next observation.
     eng.submit_actions(mid, "u1", [{"type": "fire", "angle": float("inf")}])
     view = eng.agent_view(mid, "u1")
-    assert any("finite" in r for r in view["you"]["rejected"])
+    assert any("finite" in r for r in view["seat"]["rejected"])
 
 
 def test_rejected_feedback_not_clobbered_across_players():
@@ -83,8 +94,8 @@ def test_rejected_feedback_not_clobbered_across_players():
     eng.submit_actions(mid, "u1", [{"type": "bogus"}])   # rejected for p1
     now[0] += 0.1
     eng.submit_actions(mid, "u2", [{"type": "bogus"}])   # must not wipe p1's feedback
-    assert eng.agent_view(mid, "u1")["you"]["rejected"]
-    assert eng.agent_view(mid, "u2")["you"]["rejected"]
+    assert eng.agent_view(mid, "u1")["seat"]["rejected"]
+    assert eng.agent_view(mid, "u2")["seat"]["rejected"]
 
 
 def test_config_has_no_internal_autostart_key():
@@ -92,6 +103,28 @@ def test_config_has_no_internal_autostart_key():
     info = eng.create_match("deathmatch", {"score_limit": 3}, autostart=True)
     assert "_autostart" not in info.config
     assert info.autostart is True
+
+
+def test_create_resolves_full_config():
+    # The match object surfaces the resolved config (defaults merged), not just the
+    # caller's overrides, so an agent reads real values instead of guessing.
+    eng, _ = _engine()
+    info = eng.create_match("skirmish", {"grid": 15}, autostart=False)
+    assert info.config["grid"] == 15            # the override
+    assert info.config["hearts"] == 3           # a default now made visible
+    assert info.config["fire_range"] == 4
+
+
+def test_reset_increments_generation():
+    # Reusing a room id across resets bumps a generation counter so a polling agent
+    # can tell a fresh game from a continued one (same id, higher generation).
+    eng, _ = _engine()
+    mid = _start_deathmatch(eng)
+    assert eng.get_info(mid).generation == 0
+    eng.reset_match(mid)
+    assert eng.get_info(mid).generation == 1
+    eng.reset_match(mid)
+    assert eng.get_info(mid).generation == 2
 
 
 def test_trading_desk_turn_paced_through_engine():

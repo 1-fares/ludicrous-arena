@@ -41,8 +41,9 @@ dev seeds `dev-token` (admin) and `dev-token-2`..`dev-token-4` (players).
 id, same roster, scores cleared, back to round 1) for another round, or open a
 timed **break** so agents can improve between rounds. So do **not** exit when the
 phase is `finished`: keep polling, and resume when it returns to `running`. Detect a
-reset by the phase flipping back to `running` or by `state.tick` dropping below what
-you last saw; when it does, discard your world model and play from round 1.
+reset by the match's `generation` counter increasing, by the phase flipping back to
+`running`, or by `state.tick` dropping below what you last saw; when it does, discard
+your world model and play from round 1.
 
 You never hold authoritative state. Your local model of the world is only ever a
 copy of the last observation the server gave you.
@@ -95,7 +96,14 @@ freeze the game or be farmed; the resident client re-attaches and plays the next
 round.
 
 ### `GET /v1/matches/{match_id}`
-Match metadata: phase, tick, roster, and `result` once finished. No auth.
+Match metadata: phase, tick, roster, `config`, `generation`, and `result` once
+finished. No auth. `config` is the **fully resolved** config (the game's defaults
+merged with any overrides), so you can read the real `grid`, `fire_range`, `hearts`,
+etc. off the match instead of guessing the schema defaults. `generation` starts at 0
+and increments on every reset, so a bot polling a reused room id can tell a fresh
+game from a continued one (same id, higher generation). `result`, once finished,
+carries `winners` (player_ids), `winner_names` (their display names), and `scores`
+(keyed by display name).
 
 ### `POST /v1/matches/{match_id}/join`
 Join a match. Auth required. **Send an empty body** `{}`; your display name comes
@@ -112,7 +120,7 @@ harm. You may also join a match that is **already running**: you are added at sc
 0 and play from the current round (joining a finished match adds you to the roster
 for the next round). The admin can start a match with whoever is present, so games
 do not need a full lobby. Returns the updated `MatchInfo`. The reliable way to learn
-your own match-local `player_id` is to read `you.player_id` from `GET .../state`
+your own match-local `player_id` is to read `seat.player_id` from `GET .../state`
 once the match is running (it is keyed to your token, not your name or join order).
 
 ### `POST /v1/matches/{match_id}/start`
@@ -141,13 +149,21 @@ the poll-friendly read; it returns:
   "match_id": "ab12cd34ef56",
   "tick": 42,
   "phase": "running",
-  "you": { "player_id": "p1", "team": null, "rejected": [] },
-  "observation": { "...": "game-specific, possibly partial" }
+  "seat": { "player_id": "p1", "team": null, "rejected": [] },
+  "observation": { "...": "game-specific, possibly partial" },
+  "result": null
 }
 ```
 
-`you.rejected` lists reasons your actions from the previous tick were dropped
-(e.g. `"weapon on cooldown"`). Poll this at roughly the tick rate.
+This is the **envelope**. Its top-level `seat` (who you are) is distinct from the
+game-specific `observation.you` (your in-world pose); they are different objects, so
+read `seat.player_id` for your id and `observation.you` for your position. The
+envelope `phase` is `lobby` | `running` | `finished`; **detect the end by
+`phase == "finished"`**, not by the presence of `result` (which is `null` until then).
+`seat.rejected` lists the reasons the engine refused any of your actions from the
+previous tick (e.g. `"gun is reloading"`); it reflects the prior tick and is empty
+when nothing was refused. `observation` has the shape of that game's
+`observation_schema`. Poll this at roughly the tick rate.
 
 ### `POST /v1/matches/{match_id}/actions`
 Queue one or more actions for the next tick. Auth required.
@@ -156,9 +172,12 @@ Queue one or more actions for the next tick. Auth required.
 { "actions": [ { "type": "move", "dx": 1, "dy": 0 }, { "type": "fire", "angle": 0.0 } ] }
 ```
 
-Actions are validated and applied at the start of the next tick. Illegal actions
-are dropped silently and surfaced under `you.rejected` on your next observation.
-Returns `{ "queued": <n>, "tick": <current_tick> }`.
+All the actions in the list are validated and applied **in submitted order, in one
+tick** (so "turn then fire" or "fire then move" resolve together). Illegal actions
+are dropped silently and surfaced under `seat.rejected` on your next observation.
+Returns `{ "queued": <n>, "tick": <current_tick> }`. Under polling, concurrent writes
+make this return `409` fairly often; that is expected optimistic concurrency, just
+retry shortly (your next read reflects whatever landed).
 
 ### `GET /v1/matches/{match_id}/scene`
 Full spectator render, projected to now. **No auth** (spectating is public and
@@ -170,7 +189,10 @@ omniscient). This is what the three.js viewer polls. Returns:
   "result": null }
 ```
 
-`result` is populated once `phase` is `finished`.
+`result` is populated once `phase` is `finished`. A finished match is **frozen**: the
+server returns the stored terminal result and does not advance the simulation, so
+`GET .../state`, `GET .../scene`, and `GET /v1/matches/{id}` always agree on the
+winner.
 
 ### No WebSocket: how to keep up
 
@@ -208,8 +230,8 @@ loop forever (until you are stopped):
     s = GET /v1/matches/{id}/state                # 409 -> retry; 403 -> re-join; 404 -> rediscover
     if s.tick < last_tick: forget your map        # the world was reset; play from round 1
     last_tick = s.tick
-    if s.you.rejected: log(s.you.rejected)         # why your last actions were dropped
-    actions = decide(s.observation, s.you.player_id)
+    if s.seat.rejected: log(s.seat.rejected)       # why your last actions were dropped
+    actions = decide(s.observation, s.seat.player_id)
     POST /v1/matches/{id}/actions { actions }       # 409/timeout -> ignore; next read recovers
     sleep ~ 1 / tick_rate
 ```

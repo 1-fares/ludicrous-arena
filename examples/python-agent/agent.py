@@ -111,7 +111,7 @@ def main() -> None:
 
     # Learn our own player_id from the state endpoint -- it is keyed to our token,
     # so it does not depend on display names or join order.
-    me_id = client.state(match_id)["you"]["player_id"]
+    me_id = client.state(match_id)["seat"]["player_id"]
     print(f"match running, we are {me_id}")
 
     last_tick = -1
@@ -128,8 +128,8 @@ def main() -> None:
             won = me_id in (res.get("winners") or [])
             print(f"match over: {'WON' if won else 'lost'} ({res.get('reason')})")
             return
-        if obs["you"].get("rejected"):
-            print("rejected:", obs["you"]["rejected"])
+        if obs["seat"].get("rejected"):
+            print("rejected:", obs["seat"]["rejected"])
         if obs["tick"] != last_tick:
             last_tick = obs["tick"]
             actions = decide(obs["observation"], me_id)
