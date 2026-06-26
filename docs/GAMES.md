@@ -23,7 +23,8 @@ Real-time (`realtime=true`): the world runs on the wall clock, and per-character
 cooldowns gate how often you move or fire (one shot per second).
 
 - **Players**: 2-8, free-for-all. **Tick rate**: 10 Hz.
-- **Config**: `grid` (13), `seed` (1), `wall_density` (0.16), `rounds_to_win` (10,
+- **Config**: `grid` (13), `seed` (omit for a fresh random maze + spawns per match; pin
+  it to reproduce an arena), `wall_density` (0.16), `rounds_to_win` (10,
   round-wins to take the match), `score_to_win` (10, scoreboard target only; it no
   longer ends the match), `hearts` (3), `fire_range` (4), `fire_cooldown` (10 ticks =
   1s), `move_cooldown` (3 ticks), `bullet_speed` (6 cells/s), `sight` (12),
@@ -34,9 +35,9 @@ cooldowns gate how often you move or fire (one shot per second).
   ticks is evicted), `cell_bonus` (0.05, score per new cell entered), `territory_cap`
   (4.0, most you can earn from new ground), `expose_ticks` (30, ticks idle in one cell
   before you are exposed), `collapse` (true, the collapsing floor), `collapse_start`
-  (120, grace ticks each
-  round before the outer ring cracks), `ring_interval` (70, ticks between successive
-  rings starting to decay), `decay_ticks` (40, ticks a tile cracks before it falls),
+  (200, grace ticks each
+  round before the outer ring cracks), `ring_interval` (120, ticks between successive
+  rings starting to decay), `decay_ticks` (60, ticks a tile cracks before it falls),
   `decay_stages` (4, visible crack stages), `keep_rings` (2, innermost rings that never
   fall).
 - **Actions** (submit one or more per request):

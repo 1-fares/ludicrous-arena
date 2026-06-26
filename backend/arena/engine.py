@@ -29,6 +29,7 @@ playing, cost proportional to actual reads and actions when they are.
 from __future__ import annotations
 
 import hashlib
+import random
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -79,6 +80,13 @@ class Engine:
                      room: Optional[str] = None) -> MatchInfo:
         game = registry.get(game_id)
         validate_config(game.meta, config)  # reject out-of-range config before it can hang/crash a start
+        # Fresh arena per match: if the game has a seed knob and the caller did not pin
+        # one, assign a random seed now so two matches of the same game do not share an
+        # identical maze and starting positions. A pinned seed is honoured (reproducible
+        # arena). The chosen seed is baked into the resolved config below, so catch-up,
+        # encode/decode, and round resets all stay deterministic from the stored state.
+        if "seed" not in config and "seed" in game.meta.config_schema.get("properties", {}):
+            config = {**config, "seed": random.randrange(1, 2**31 - 1)}
         # Store the fully resolved config (defaults merged with the overrides), not
         # just the overridden keys, so an agent can read the real grid/fire_range/etc
         # off the match object instead of guessing the schema defaults. init_state

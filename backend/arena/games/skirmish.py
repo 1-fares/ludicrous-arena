@@ -49,7 +49,7 @@ camper on equal kills. Kills still dominate: `score = frags + min(territory, cap
 
 Config (all optional):
     grid:            int = 13      side length
-    seed:            int = 1       deterministic maze + spawns
+    seed:            int = random  maze + spawns; omit it and the server picks a fresh seed per match (layouts/spawns vary). Pin it to reproduce an arena.
     wall_density:    float = 0.16  fraction of interior cells that are cover
     rounds_to_win:   int = 10      round-wins to take the match (first to N)
     score_to_win:    int = 10      scoreboard target (display only; does not end the match)
@@ -65,9 +65,9 @@ Config (all optional):
     expose_ticks:    int = 30      ticks idle in one cell before you are exposed
     drop_after:      int = 0       ticks with no action before an idle client is evicted (0=never, the default)
     collapse:        bool = True   collapsing floor: the arena falls in from the outer ring each round
-    collapse_start:  int = 120     grace ticks each round before the outer ring starts cracking
-    ring_interval:   int = 70      ticks between successive rings beginning to decay
-    decay_ticks:     int = 40      ticks a tile spends visibly cracking before it falls
+    collapse_start:  int = 200     grace ticks each round before the outer ring starts cracking
+    ring_interval:   int = 120     ticks between successive rings beginning to decay
+    decay_ticks:     int = 60      ticks a tile spends visibly cracking before it falls
     decay_stages:    int = 4       number of visible crack stages (0..decay_stages-1)
     keep_rings:      int = 2       innermost rings that never collapse (the core)
 
@@ -123,7 +123,7 @@ META = GameMeta(
         "type": "object",
         "properties": {
             "grid": {"type": "integer", "default": 13, "minimum": 5, "maximum": 40},
-            "seed": {"type": "integer", "default": 1},
+            "seed": {"type": "integer", "default": 1, "description": "Maze + spawn RNG seed. Omit it (the usual case) and the server picks a fresh random seed per match, so the arena layout and starting positions differ every game; pin it only to reproduce a specific arena."},
             "wall_density": {"type": "number", "default": 0.16, "minimum": 0.0, "maximum": 0.5},
             "rounds_to_win": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100,
                               "description": "Round-wins needed to take the match (first to N). A round goes to the last fighter standing; the match ends when a fighter reaches this many round-wins."},
@@ -149,11 +149,11 @@ META = GameMeta(
                            "description": "Ticks with no submitted action before an idle client is evicted from the match. 0 (the default) disables it: a present player is never removed for inactivity, only a value > 0 evicts."},
             "collapse": {"type": "boolean", "default": True,
                          "description": "Enable the collapsing floor: each round the arena falls in from the outer ring. A fighter caught on a tile when it falls is out for the current round (0 points that round) and respawns next round, so the collapse forces every round to resolve. False keeps the floor solid (old behaviour)."},
-            "collapse_start": {"type": "integer", "default": 120, "minimum": 0, "maximum": 1_000_000,
+            "collapse_start": {"type": "integer", "default": 200, "minimum": 0, "maximum": 1_000_000,
                                "description": "Grace ticks each round before the outermost ring starts to crack (timing is relative to the round start, so every round begins solid)."},
-            "ring_interval": {"type": "integer", "default": 70, "minimum": 1, "maximum": 1_000_000,
+            "ring_interval": {"type": "integer", "default": 120, "minimum": 1, "maximum": 1_000_000,
                               "description": "Ticks between successive rings (outer to inner) beginning to decay."},
-            "decay_ticks": {"type": "integer", "default": 40, "minimum": 1, "maximum": 1_000_000,
+            "decay_ticks": {"type": "integer", "default": 60, "minimum": 1, "maximum": 1_000_000,
                             "description": "Ticks a tile spends visibly cracking before it falls into the void."},
             "decay_stages": {"type": "integer", "default": 4, "minimum": 1, "maximum": 8,
                              "description": "Number of visible crack stages (0..decay_stages-1) a tile passes through while decaying."},
@@ -336,7 +336,7 @@ class State:
     cfg: dict[str, Any]
     grid: int
     walls: list[list[int]]       # [[x,y], ...] interior cover cells (no border ring)
-    spawns: list[list[int]]      # spawn cells, one per slot index
+    spawns: list[list[int]]      # spawn candidate pool: open cells (off ring 0) a fighter may start on; per-round picks are drawn from it
     fighters: dict[str, Fighter]
     bullets: list[Bullet] = field(default_factory=list)
     round: int = 1
@@ -349,10 +349,12 @@ class State:
 # ---- maze generation ------------------------------------------------------
 
 def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[int, int]]]:
-    """Deterministic, relatively-open maze: scattered interior cover (single blocks
-    and short segments), with no border wall. Returns (walls, spawn cells). Spawns are
-    taken from the largest open region, spread apart, and never on ring 0 (the
-    outermost row/column, the first ground to collapse)."""
+    """Deterministic (given cfg["seed"]) relatively-open maze: scattered interior cover
+    (single blocks and short segments), with no border wall. Returns (walls, spawn pool).
+    The spawn pool is every open cell in the largest region that is off ring 0 (the
+    outermost row/column, the first ground to collapse); the actual per-round spawn cells
+    are drawn from it at random by _pick_spawns, so fighters do not start in the same
+    places every game or every round."""
     g = cfg["grid"]
     rng = random.Random(cfg["seed"])
     walls: set[tuple[int, int]] = set()
@@ -402,19 +404,32 @@ def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[i
         if len(comp) > len(best):
             best = comp
 
-    # Spawns: greedily pick cells far from those already chosen. Exclude ring 0 (the
-    # outermost row/column, the first ground to collapse) so no fighter starts on
-    # ground that falls early; fall back to the full region only if nothing is left.
+    # Spawn pool: every open cell in the largest region, excluding ring 0 (the outermost
+    # row/column, the first ground to collapse) so no fighter starts on ground that falls
+    # early. Fall back to the full region, then a safe cell, only if nothing inner is open.
     pool = sorted(best) or sorted(open_cells)
     inner = [c for c in pool if min(c[0], c[1], g - 1 - c[0], g - 1 - c[1]) >= 1]
     region = inner or pool or [(1, 1)]
-    spawns: list[tuple[int, int]] = [region[0]]
-    while len(spawns) < META.max_players and len(spawns) < len(region):
-        far = max(region, key=lambda c: min((c[0] - s[0]) ** 2 + (c[1] - s[1]) ** 2 for s in spawns))
-        if far in spawns:
-            break
-        spawns.append(far)
-    return walls, spawns
+    return walls, region
+
+
+def _pick_spawns(pool: list[tuple[int, int]], count: int,
+                 rng: random.Random) -> list[tuple[int, int]]:
+    """Pick ``count`` distinct, spread-out cells from ``pool`` using ``rng``. Greedy
+    farthest-point placement with a randomised first pick and a randomised choice among
+    the few farthest candidates at each step: spawns stay spread apart but vary run to
+    run instead of landing on the same cells every time. Deterministic for a given rng,
+    so the engine's catch-up stays reproducible."""
+    cells = list(pool)
+    if not cells or count <= 0:
+        return []
+    chosen = [rng.choice(cells)]
+    while len(chosen) < count and len(chosen) < len(cells):
+        rest = [c for c in cells if c not in chosen]
+        rest.sort(key=lambda c: min((c[0] - s[0]) ** 2 + (c[1] - s[1]) ** 2
+                                    for s in chosen), reverse=True)
+        chosen.append(rng.choice(rest[:max(1, min(len(rest), 3))]))
+    return chosen
 
 
 def _int(v: Any) -> bool:
@@ -506,39 +521,49 @@ class Skirmish:
 
     def init_state(self, config: dict[str, Any], players: list[PlayerSlot]) -> State:
         cfg = merge_defaults(self.meta, config)
-        walls, spawns = _build_maze(cfg)
+        walls, pool = _build_maze(cfg)
+        # Randomised but spread-out round-1 placement, derived from the (per-match) seed
+        # so it is reproducible on catch-up yet differs between matches and, via
+        # _new_round, between rounds. No players at create time (pool is built, fighters
+        # are added by add_player on join); a full roster arrives via reset_match.
+        rng = random.Random(f"{int(cfg['seed'])}:r1")
+        picks = _pick_spawns(pool, len(players), rng)
+        rng.shuffle(picks)
         fighters: dict[str, Fighter] = {}
         for i, p in enumerate(players):
-            sx, sy = spawns[i % len(spawns)]
+            sx, sy = picks[i] if i < len(picks) else pool[i % len(pool)]
             fighters[p.player_id] = Fighter(name=p.display_name, x=sx, y=sy,
-                                            facing=i % 4, hearts=cfg["hearts"])
+                                            facing=rng.randrange(4), hearts=cfg["hearts"])
         return State(
             cfg=cfg, grid=cfg["grid"],
             walls=[[x, y] for (x, y) in sorted(walls)],
-            spawns=[[x, y] for (x, y) in spawns],
+            spawns=[[x, y] for (x, y) in pool],
             fighters=fighters,
         )
 
     def add_player(self, state: State, slot: PlayerSlot) -> None:
-        """Add a player to a running match at score 0 (frags/territory start fresh,
-        so a late joiner is not handicapped beyond being behind on the board).
-        Idempotent on player_id so a join retry cannot duplicate the fighter."""
+        """Add a player to a running/lobby match at score 0 (frags/territory start fresh,
+        so a late joiner is not handicapped beyond being behind on the board). Idempotent
+        on player_id so a join retry cannot duplicate the fighter. The spawn cell is drawn
+        at random (seeded, so reproducible) from the open spawn pool, avoiding cells
+        already taken, so late joiners are scattered too instead of landing in fixed
+        slots."""
         if slot.player_id in state.fighters:
             return
         i = len(state.fighters)
-        sx, sy = state.spawns[i % len(state.spawns)]
         occupied = {(f.x, f.y) for f in state.fighters.values()}
-        if (sx, sy) in occupied:                    # deterministic free cell if the spawn is taken
+        rng = random.Random(f"{int(state.cfg['seed'])}:join:{state.tick}:{i}")
+        pool = [(x, y) for x, y in state.spawns if (x, y) not in occupied]
+        if not pool:                                # pool exhausted: any free inner cell
             walls = self._wallset(state)
             g = state.grid
             free = [(x, y) for x in range(g) for y in range(g)
                     if (x, y) not in walls and (x, y) not in occupied]
             inner = [c for c in free if min(c[0], c[1], g - 1 - c[0], g - 1 - c[1]) >= 1]
-            pick = inner or free                    # prefer ring >= 1, off the first ground to fall
-            if pick:
-                sx, sy = pick[(i * 7) % len(pick)]
+            pool = inner or free or [(1, 1)]
+        sx, sy = _pick_spawns(pool, 1, rng)[0]
         state.fighters[slot.player_id] = Fighter(name=slot.display_name, x=sx, y=sy,
-                                                 facing=i % 4, hearts=state.cfg["hearts"],
+                                                 facing=rng.randrange(4), hearts=state.cfg["hearts"],
                                                  last_act=state.tick)
 
     def active_players(self, state: State) -> set[str]:
@@ -775,13 +800,19 @@ class Skirmish:
             leaders[0].round_wins += 1
 
     def _new_round(self, state: State) -> None:
+        # Fresh, spread-out spawn cells each round, seeded from (match seed, round number)
+        # so positions vary round to round but stay reproducible for the engine's catch-up.
+        nxt = state.round + 1
+        rng = random.Random(f"{int(state.cfg['seed'])}:r{nxt}")
+        picks = _pick_spawns([(x, y) for x, y in state.spawns], len(state.fighters), rng)
+        rng.shuffle(picks)
         for i, (pid, f) in enumerate(state.fighters.items()):
             # Falling is round-scoped: clear out/fell_tick and respawn the fighter, the
             # same as a downed fighter. round_wins/frags/terr persist across rounds.
             f.out = False
             f.fell_tick = None
-            sx, sy = state.spawns[i % len(state.spawns)]
-            f.x, f.y, f.facing = sx, sy, i % 4
+            sx, sy = picks[i] if i < len(picks) else (f.x, f.y)
+            f.x, f.y, f.facing = sx, sy, rng.randrange(4)
             f.hearts = state.cfg["hearts"]
             f.alive = True
             f.move_cd = f.fire_cd = 0
@@ -789,7 +820,7 @@ class Skirmish:
             f.last_hit = None                                  # a new round clears stale damage cues
             f.last_act = state.tick                            # fresh drop grace each round
         state.bullets = []
-        state.round += 1
+        state.round = nxt
         state.phase = "fighting"
         state.round_start = state.tick
 
