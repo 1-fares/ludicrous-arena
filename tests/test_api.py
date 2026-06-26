@@ -225,6 +225,39 @@ def test_finished_match_state_no_403_for_pruned_participant(client):
     assert r.json()["result"]["winners"] == ["p1"]
 
 
+def test_arena_resolves_single_match(client):
+    # GET /v1/arena returns the single current match; no auth needed.
+    mid = client.post("/v1/matches", json={"game_id": "skirmish", "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    r = client.get("/v1/arena")
+    assert r.status_code == 200, r.text
+    assert r.json()["match_id"] == mid
+    assert r.json()["phase"] == "lobby"
+
+
+def test_arena_empty_when_no_match(client):
+    # With no match in the store, GET /v1/arena is 204 with an empty body. The
+    # store is shared across this module's tests, so clear any leftover first.
+    for m in client.get("/v1/matches").json():
+        client.delete(f"/v1/matches/{m['match_id']}", headers=_admin_headers())
+    r = client.get("/v1/arena")
+    assert r.status_code == 204
+    assert not r.content
+
+
+def test_create_match_replaces_previous_over_http(client):
+    # The single-arena model holds over the HTTP surface too: creating a second
+    # match removes the first, so GET /v1/matches returns only the newest.
+    first = client.post("/v1/matches", json={"game_id": "skirmish", "autostart": False},
+                        headers=_admin_headers()).json()["match_id"]
+    second = client.post("/v1/matches", json={"game_id": "deathmatch", "autostart": False},
+                         headers=_admin_headers()).json()["match_id"]
+    ids = [m["match_id"] for m in client.get("/v1/matches").json()]
+    assert ids == [second]
+    assert client.get(f"/v1/matches/{first}").status_code == 404
+    assert client.get("/v1/arena").json()["match_id"] == second
+
+
 def test_named_room_is_stable_and_reused(client):
     a = client.post("/v1/matches", json={"game_id": "skirmish", "room": "friday", "autostart": False},
                     headers=_admin_headers()).json()

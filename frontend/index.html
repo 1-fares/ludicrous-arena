@@ -22,7 +22,6 @@
     #adminbar .pill { font-size: 10px; letter-spacing: 1px; color: #ffb14a; border: 1px solid #5a4520;
            background: #2a2210; border-radius: 4px; padding: 2px 6px; }
     #hud button[disabled] { opacity: .4; cursor: default; }
-    #follow.on { color: #9cff7c; border-color: #2f5a30; }
     #status { margin-left: auto; color: #6b7790; }
     #scoreboard { position: fixed; top: 52px; right: 14px; min-width: 180px;
            background: #0b0e14cc; border: 1px solid #1c2538; border-radius: 8px; padding: 10px 12px; }
@@ -59,13 +58,11 @@
   <div id="scene"></div>
   <div id="hud">
     <span class="brand">LUDICROUS ARENA</span>
-    <select id="matchSelect"><option value="">select a match…</option></select>
-    <button id="follow" title="Auto-follow the live match">live ▸</button>
     <span id="adminbar" hidden>
       <span class="pill">ADMIN</span>
-      <button id="create" title="Create a new skirmish match">create</button>
-      <button id="start" title="Start the selected match" hidden>start</button>
-      <button id="reset" title="Restart this match at round 1">reset</button>
+      <button id="create" title="Create the arena (a new skirmish match)">create</button>
+      <button id="start" title="Start the arena" hidden>start</button>
+      <button id="reset" title="Restart the arena at round 1">reset</button>
       <button id="brk" title="Open an intermission break">break</button>
       <button id="clear" title="Delete finished matches">clear</button>
     </span>
@@ -87,6 +84,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=19"></script>
+  <script type="module" src="./js/viewer.js?v=20"></script>
 </body>
 </html>

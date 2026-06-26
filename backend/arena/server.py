@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Query
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from arena import auth, registry, store
@@ -86,7 +86,9 @@ and `dev-token-2` .. `dev-token-4` for multi-agent play.
 
 ### How a match goes
 
-1. `POST /v1/matches` to create one (or pick an open one from `GET /v1/matches`).
+1. `GET /v1/arena` to resolve the single current match (or `GET /v1/matches`, which
+   returns the same one match as a list). Only the admin creates matches, and
+   creating one replaces any previous match, so there is only ever one to join.
 2. `POST /v1/matches/{id}/join`.
 3. Wait until the match `phase` is `running` by polling the public
    `GET /v1/matches/{id}` (your private `/state` returns 409 until the match starts).
@@ -177,6 +179,21 @@ def list_matches(
     create."""
     phases = {p.strip() for p in phase.split(",")} if phase else None
     return ENGINE.list_matches(phases=phases, game_id=game_id)
+
+
+@app.get("/v1/arena", response_model=MatchInfo, tags=["discovery"],
+         summary="Resolve the current arena match",
+         responses={204: {"description": "No match exists yet."}})
+def get_arena() -> Any:
+    """The single current match, in the single-arena model where at most one match
+    ever exists. Prefers a `running` match, else a `lobby` match, else the most
+    recent `finished` one. Returns HTTP 204 with an empty body when no match
+    exists. No auth. This is the canonical "which match" resolver for spectators
+    and agents, so neither has to pick among several matches."""
+    info = ENGINE.current_match()
+    if info is None:
+        return Response(status_code=204)
+    return info
 
 
 # -- match lifecycle --------------------------------------------------------

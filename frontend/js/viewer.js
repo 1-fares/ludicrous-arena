@@ -827,10 +827,11 @@ function toast(msg, leave) {
   setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 3500);
 }
 
-// ---- match selection, auto-follow director, polling ----------------------
+// ---- single-arena resolution + polling -----------------------------------
+// A spectator never picks a match. A resolver loop finds THE current arena and
+// connect() drives the high-frequency scene poll for whichever match that is.
 let pollTimer = null, activeGame = null, statusExtra = "";
-let currentMatch = null, currentGame = null, autoFollow = true, adminToken = null;
-const matchSelect = document.getElementById("matchSelect");
+let currentMatch = null, currentGame = null, adminToken = null;
 const gameMeta = {};   // game_id -> {min, title}
 
 function titleFor(g) { return gameMeta[g]?.title || (g ? g[0].toUpperCase() + g.slice(1) : "-"); }
@@ -883,7 +884,7 @@ function connect(matchId, gameId) {
         fetch(`${API}/v1/matches/${matchId}`),
       ]);
       if (sceneR.status === 404 || infoR.status === 404) {
-        currentMatch = null;                       // gone (deleted/GC'd): the director repicks
+        currentMatch = null;                       // gone (deleted/GC'd): the resolver repicks
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         return;
       }
@@ -943,41 +944,52 @@ function connect(matchId, gameId) {
   pollTimer = setInterval(poll, 1000 / POLL_HZ);
 }
 
-const followBtn = document.getElementById("follow");
-matchSelect.addEventListener("change", (e) => {
-  autoFollow = false; followBtn.classList.remove("on");      // a manual pick pins the match
-  const opt = e.target.selectedOptions[0];
-  connect(e.target.value, opt?.dataset.game);
-});
-followBtn.addEventListener("click", () => {
-  autoFollow = true; followBtn.classList.add("on"); director();   // hand control back to the director
-});
-
+// There is one arena. Of the matches the server knows about, the one to show is the
+// running one, else a lobby waiting to start, else the most recent finished one.
 function bestMatch(ms) {
-  return ms.find(m => m.phase === "running") || ms.find(m => m.phase === "finished") || ms[0] || null;
+  return ms.find(m => m.phase === "running") || ms.find(m => m.phase === "lobby")
+      || ms.find(m => m.phase === "finished") || ms[0] || null;
 }
 
-// The director keeps the dropdown fresh and, while auto-following, connects to the
-// best live match, advancing to the next game on its own. It never yanks a spectator
-// who has pinned a match (manual pick or ?match=).
-async function director() {
-  let matches;
-  try { matches = await (await fetch(`${API}/v1/matches`)).json(); }
-  catch (e) { statusEl.textContent = `cannot reach API at ${API}`; return; }
-  const keep = matchSelect.value;
-  matchSelect.innerHTML = `<option value="">select a match…</option>` + matches.map(m =>
-    `<option value="${m.match_id}" data-game="${m.game_id}">${esc(m.game_id)} · ${m.match_id.slice(0, 6)} · ${m.phase} · ${m.players.length}p</option>`).join("");
-  if ([...matchSelect.options].some(o => o.value === keep)) matchSelect.value = keep;
-  if (!autoFollow) return;
-  const best = bestMatch(matches);
-  if (best) {
-    if (best.match_id !== currentMatch) { matchSelect.value = best.match_id; connect(best.match_id, best.game_id); }
-  } else if (!currentMatch) {
-    setBanner(`<b>LUDICROUS ARENA</b><div class="bsub">No matches running. This page connects automatically when one begins.</div>`);
-    scoreboard.hidden = true; statusEl.textContent = "waiting for a match";
+// Ask the server for THE current arena. Returns a match-info object, null if there is
+// definitively no arena (endpoint present, empty), or undefined if /v1/arena is not
+// available so the caller should fall back to listing matches.
+async function fetchArena() {
+  let r;
+  try { r = await fetch(`${API}/v1/arena`); }
+  catch (e) { return undefined; }            // network/other: let the caller fall back
+  if (r.status === 204) return null;         // present, but no current arena
+  if (!r.ok) return undefined;               // 404 (not deployed) or error: fall back
+  const body = await r.json().catch(() => null);
+  return body && body.match_id ? body : null;
+}
+
+// Tear down whatever was on screen and show the centered empty state. The resolver keeps
+// running, so the arena appears on its own the moment an admin creates one.
+function showEmpty() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (currentMatch !== null) clearRoot();    // free the previous arena's GPU resources
+  currentMatch = null; currentGame = null; activeGame = null;
+  scoreboard.hidden = true;
+  setBanner(`<b>No game running</b><div class="bsub">This page connects to the arena automatically when a match begins.</div>`);
+  statusEl.textContent = "no game running";
+}
+
+// The single-arena resolver: prefer /v1/arena, else pick the one match from the list.
+// Connect when the target changes; show the empty state when there is none.
+async function resolveArena() {
+  let match = await fetchArena();
+  if (match === undefined) {                 // /v1/arena unavailable: fall back to the list
+    try { match = bestMatch(await (await fetch(`${API}/v1/matches`)).json()); }
+    catch (e) { statusEl.textContent = `cannot reach API at ${API}`; return; }
+  }
+  if (match) {
+    if (match.match_id !== currentMatch) connect(match.match_id, match.game_id);
+  } else {
+    showEmpty();
   }
 }
-setInterval(director, 3000);
+setInterval(resolveArena, 2500);
 
 // ---- admin controls (revealed by an admin token) -------------------------
 function updateAdminControls(info) {
@@ -1014,9 +1026,8 @@ async function adminCall(method, path, body) {
     const r = await adminCall("POST", "/v1/matches", { game_id: "skirmish", autostart: false });
     if (r.ok) {
       const m = await r.json();
-      autoFollow = false; followBtn.classList.remove("on");
-      matchSelect.value = m.match_id; connect(m.match_id, m.game_id);
-      statusEl.textContent = "match created; waiting for players";
+      connect(m.match_id, m.game_id);        // become the arena immediately
+      statusEl.textContent = "arena created; waiting for players";
     }
   });
   on("start", async () => {
@@ -1042,25 +1053,13 @@ async function adminCall(method, path, body) {
   on("clear", async () => {
     const ms = await (await fetch(`${API}/v1/matches?phase=finished`)).json();
     for (const m of ms) await adminCall("DELETE", `/v1/matches/${m.match_id}`);
-    statusEl.textContent = `cleared ${ms.length} finished`; director();
+    statusEl.textContent = `cleared ${ms.length} finished`; resolveArena();
   });
 })();
 
-const wantMatch = new URLSearchParams(location.search).get("match");
 (async function init() {
   await loadGameMeta();
-  if (wantMatch) {
-    autoFollow = false;                       // an explicit link pins the match
-    let game = "skirmish";
-    try {
-      const m = (await (await fetch(`${API}/v1/matches`)).json()).find(x => x.match_id === wantMatch);
-      if (m) game = m.game_id;
-    } catch (e) { /* fall back to skirmish */ }
-    connect(wantMatch, game);
-  } else {
-    followBtn.classList.add("on");
-  }
-  director();                                 // populate the dropdown and (if following) connect
+  resolveArena();                             // find the one arena and connect to it
 })();
 
 animate(); // RENDERERS initialized above; safe to start the render loop

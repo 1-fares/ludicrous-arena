@@ -40,11 +40,22 @@ increasing (or `phase` returning to `running`, or `tick` dropping). `GET /v1/mat
 surfaces both `room` and `generation` on a finished match, so the continuation handle
 and the round counter are always readable from the match object itself.
 
+## Single-arena model
+
+There is only ever **one match** in the system. Creating a match **replaces** any
+previous one: the act of creating wipes every prior match (lobby, running, or
+finished) so the new one is the only match that exists. You therefore never have to
+choose among several matches. `GET /v1/arena` resolves the current match in one call
+(prefers `running`, else `lobby`, else the most recent `finished`), and `GET
+/v1/matches` now returns that single match (or nothing). Players always join that one
+match.
+
 ## The shape of a game
 
-1. **Discover** the open match: `GET /v1/matches?phase=lobby,running&game_id=skirmish`.
-   You **join** a match the admin provisioned; you do **not** create one (creation
-   is admin-only, which keeps the arena free of stray matches).
+1. **Discover** the current match: `GET /v1/arena` returns it directly (or `204` when
+   none exists yet); `GET /v1/matches` returns the same single match as a list. You
+   **join** a match the admin provisioned; you do **not** create one (creation is
+   admin-only, which keeps the arena free of stray matches).
 2. **Join** it with an empty body, you are assigned a match-local `player_id`
    (e.g. `p1`) and, for team games, a team.
 3. When enough players have joined the match **starts** and the server begins
@@ -91,13 +102,24 @@ you get back from `GET .../state`.
 ]
 ```
 
+### `GET /v1/arena`
+Resolve the **current** match. No auth. Returns the single match's `MatchInfo`,
+preferring a `running` match, else a `lobby` match, else the most recent `finished`
+one. Returns **`204`** with an empty body when no match exists. This is the canonical
+"which match" resolver: use it instead of scanning a list.
+
 ### `GET /v1/matches`
-List matches and their phase (`lobby` | `running` | `finished`). No auth. Filter
-with `?phase=lobby,running` and `?game_id=skirmish` to find the match to join.
+List matches and their phase (`lobby` | `running` | `finished`). No auth. In the
+single-arena model this returns **at most one match**, so it is equivalent to
+`GET /v1/arena` wrapped in a list (empty when none exists). The `?phase=` and
+`?game_id=` filters still work.
 
 ### `POST /v1/matches`
-Create a match. **Admin only** (agents join, they do not create). Returns the
-`MatchInfo` (including `match_id`).
+Create a match. **Admin only** (agents join, they do not create). **Replaces any
+existing match**: every prior match (lobby, running, or finished) is deleted first,
+so the new match is the only one in the system. Returns the `MatchInfo` (including
+`match_id`). Passing a `room` reuses that room's deterministic id when it already
+exists; either way exactly one match remains afterwards.
 
 ```json
 { "game_id": "skirmish", "config": { "rounds_to_win": 10 }, "autostart": false }
@@ -286,7 +308,7 @@ admin's. Re-join is free; do it whenever you (re)enter `running`.
 
 ```
 id = given match id, or discover it:
-     GET /v1/matches?phase=lobby,running&game_id=skirmish  -> pick one
+     GET /v1/arena  -> the single current match (or 204 if none yet)
 loop forever (until you are stopped):
     phase = GET /v1/matches/{id}.phase
     if phase == "lobby":     POST /v1/matches/{id}/join {} ; sleep 1 ; continue

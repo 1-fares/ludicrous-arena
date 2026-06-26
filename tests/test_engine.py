@@ -4,7 +4,8 @@ catch-up, optimistic writes, and lazy finalization are all deterministic.
 """
 
 import arena.games  # noqa: F401  -- registers games
-from arena.engine import Engine, NotParticipant
+from arena.engine import Engine, NotParticipant, _now_iso
+from arena.models import MatchInfo, MatchPhase
 from arena.store import MemoryStore
 
 
@@ -289,6 +290,77 @@ def test_finished_match_read_allows_pruned_participant():
         assert False, "expected a non-participant to be rejected"
     except NotParticipant:
         pass
+
+
+def test_create_match_replaces_existing_single_arena():
+    # Single-arena model: creating a match deletes every prior match (lobby,
+    # running, AND finished), so exactly one match exists afterwards.
+    eng, now = _engine()
+    first = eng.create_match("skirmish", {"grid": 11}, autostart=False)
+    eng.join_match(first.match_id, "u1", "A", None)  # gives the old match a roster
+    second = eng.create_match("deathmatch", {"score_limit": 3}, autostart=False)
+    matches = eng.list_matches()
+    assert [m.match_id for m in matches] == [second.match_id]
+    # The replaced match and its state are gone.
+    try:
+        eng.get_info(first.match_id)
+        assert False, "expected the replaced match to be deleted"
+    except KeyError:
+        pass
+    assert eng._store.get_match_state(first.match_id) is None
+
+
+def test_create_match_replaces_finished_match():
+    # A finished match is also cleared by the next create, so a stale result never
+    # lingers alongside the new arena.
+    eng, now = _engine()
+    mid = _start_deathmatch(eng)        # score_limit 1: ends on the first kill
+    now[0] += 600.0
+    eng.scene_view(mid)                 # lazy-finalize to finished
+    assert eng.get_info(mid).phase.value == "finished"
+    new = eng.create_match("skirmish", {"grid": 9}, autostart=False)
+    assert [m.match_id for m in eng.list_matches()] == [new.match_id]
+
+
+def test_named_room_create_leaves_single_match():
+    # The named-room deterministic-id path still leaves exactly one match: a prior
+    # match under a different id is removed, and re-creating the same room reuses it.
+    eng, _ = _engine()
+    stray = eng.create_match("deathmatch", {"score_limit": 3}, autostart=False)
+    a = eng.create_match("skirmish", {"grid": 11}, autostart=False, room="friday")
+    assert a.match_id.startswith("room-")
+    assert [m.match_id for m in eng.list_matches()] == [a.match_id]
+    # Re-creating the same room reuses the same id and still leaves one match.
+    b = eng.create_match("skirmish", {"grid": 11}, autostart=False, room="friday")
+    assert b.match_id == a.match_id
+    assert [m.match_id for m in eng.list_matches()] == [a.match_id]
+
+
+def test_current_match_resolves_single_and_empty():
+    eng, now = _engine()
+    assert eng.current_match() is None          # no match yet
+    info = eng.create_match("skirmish", {"grid": 11}, autostart=False)
+    cur = eng.current_match()
+    assert cur is not None and cur.match_id == info.match_id
+    assert cur.phase.value == "lobby"
+
+
+def test_current_match_prefers_running_over_finished():
+    # If a finished and a running match ever coexist, the resolver prefers running.
+    # Build the pair directly in the store, bypassing create_match's wipe.
+    eng, now = _engine()
+    fin = eng.create_match("deathmatch", {"score_limit": 1, "arena_size": 12}, autostart=False)
+    # Mark the first match finished in place.
+    meta, ver = eng._store.get_match_meta(fin.match_id)
+    meta["phase"] = "finished"
+    eng._store.put_match_meta(fin.match_id, meta, ver)
+    eng._store.update_match_index(fin.match_id, "deathmatch", "finished")
+    # A running match added straight to the store (no wipe).
+    run = MatchInfo(match_id="run-1", game_id="deathmatch", phase=MatchPhase.running,
+                    config={}, players=[], created_at=_now_iso())
+    eng._store.put_match_meta("run-1", run.model_dump(mode="json"), None)
+    eng._store.update_match_index("run-1", "deathmatch", "running")
+    assert eng.current_match().match_id == "run-1"
 
 
 def test_lobby_shows_board_and_players_before_start():

@@ -84,17 +84,25 @@ class Engine:
         # off the match object instead of guessing the schema defaults. init_state
         # merges defaults again, which is idempotent on an already-resolved config.
         config = merge_defaults(game.meta, config)
+        # Single-arena model: only one match ever exists. Compute the new match's id
+        # first, then delete every other match (lobby, running, AND finished) so the
+        # arena is empty before we create or reuse the target. A reused named room is
+        # the one id we must not delete.
+        if room:
+            match_id = "room-" + hashlib.sha256(room.encode()).hexdigest()[:10]
+        else:
+            match_id = uuid.uuid4().hex[:12]
+        for existing in self.list_matches():
+            if existing.match_id != match_id:
+                self._store.delete_match(existing.match_id)
         if room:
             # Named room: a stable, deterministic id reused across a whole session.
-            match_id = "room-" + hashlib.sha256(room.encode()).hexdigest()[:10]
             existing = self._store.get_match_meta(match_id)
             if existing is not None:
                 info = MatchInfo.model_validate(existing[0])
                 if info.phase == MatchPhase.finished:
                     return self.reset_match(match_id)   # reuse the room, fresh round 1
                 return info                              # lobby/running: hand it back
-        else:
-            match_id = uuid.uuid4().hex[:12]
         info = MatchInfo(
             match_id=match_id, game_id=game_id, phase=MatchPhase.lobby,
             config=config, autostart=autostart, players=[], room=room,
@@ -481,6 +489,22 @@ class Engine:
             self._store.save_match_result(match_id, meta.game_id, result.model_dump())
         except Conflict:
             pass
+
+    def current_match(self) -> Optional[MatchInfo]:
+        """The single current arena match, or None if none exists. In the
+        single-arena model at most one match exists, but if a stray pair ever
+        coexists this resolves deterministically: prefer running, else lobby, else
+        the most recent finished (by created_at). This is the canonical "which
+        match" answer for spectators and agents."""
+        order = {MatchPhase.running: 0, MatchPhase.lobby: 1, MatchPhase.finished: 2}
+        matches = self.list_matches()
+        if not matches:
+            return None
+        best_rank = min(order.get(m.phase, 3) for m in matches)
+        candidates = [m for m in matches if order.get(m.phase, 3) == best_rank]
+        # Within the best phase, the most recently created match wins. created_at is
+        # an ISO-8601 UTC string, so lexicographic max is chronological max.
+        return max(candidates, key=lambda m: m.created_at)
 
     def list_matches(self, phases: Optional[set[str]] = None,
                      game_id: Optional[str] = None) -> list[MatchInfo]:
