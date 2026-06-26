@@ -618,3 +618,24 @@ def test_encode_decode_roundtrips_out_fields():
     # Defaults survive for an untouched fighter.
     assert restored.fighters["p2"].out is False and restored.fighters["p2"].fell_tick is None
     assert g.render(restored) == g.render(st)
+
+
+def test_decode_state_fills_new_config_defaults():
+    """A match created before a config key existed must still decode and run.
+
+    Regression: a running match whose stored config predates rounds_to_win and the
+    collapse knobs used to 404 with KeyError when the rules read the missing key.
+    decode_state now merges the config defaults, so older configs are forward-safe.
+    """
+    g = _game()
+    data = g.encode_state(g.init_state({"grid": 13}, _slots(2)))
+    for k in ("rounds_to_win", "collapse", "ring_interval", "decay_ticks",
+              "decay_stages", "keep_rings", "drop_after"):
+        data["cfg"].pop(k, None)
+    st = g.decode_state(data)
+    assert st.cfg["rounds_to_win"] == 10
+    assert st.cfg["collapse"] is True
+    # The rules paths that read the new keys must not raise.
+    g.result(st)
+    g.observe(st, "p1")
+    g.render(st)

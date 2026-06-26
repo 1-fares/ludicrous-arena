@@ -1008,8 +1008,11 @@ class Skirmish:
         }
 
     def decode_state(self, data: dict[str, Any]) -> State:
+        # Merge in config defaults so a match created before a config key existed
+        # (e.g. rounds_to_win, the collapse knobs) decodes with the new defaults
+        # filled in, instead of raising KeyError when the rules read a missing key.
         return State(
-            cfg=data["cfg"], grid=data["grid"], walls=data["walls"], spawns=data["spawns"],
+            cfg=merge_defaults(self.meta, data["cfg"]), grid=data["grid"], walls=data["walls"], spawns=data["spawns"],
             fighters={pid: Fighter(**f) for pid, f in data["fighters"].items()},
             bullets=[Bullet(**b) for b in data["bullets"]],
             round=data["round"], phase=data["phase"], inter_cd=data["inter_cd"],
