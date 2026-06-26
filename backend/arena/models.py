@@ -81,7 +81,7 @@ class MatchInfo(BaseModel):
     match_id: str = Field(description="Unique match id, used in all per-match endpoints.", examples=["ab12cd34ef56"])
     game_id: str = Field(description="Which game this match runs.", examples=["skirmish"])
     phase: MatchPhase
-    tick: int = Field(default=0, description="Last recorded tick (0 until started; final tick once finished).")
+    tick: int = Field(default=0, description="Current simulation tick, projected to now on read (0 before start; the frozen final tick once finished).")
     config: dict[str, Any] = Field(default_factory=dict, description="Effective config for this match.")
     autostart: bool = Field(default=True, description="Whether the match starts automatically once `min_players` have joined.")
     players: list[PlayerSlot] = Field(default_factory=list, description="Current roster.")

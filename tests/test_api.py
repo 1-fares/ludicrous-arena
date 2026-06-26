@@ -161,6 +161,28 @@ def test_reset_unknown_match_404(client):
     assert client.post("/v1/matches/nope/reset", headers=_admin_headers()).status_code == 404
 
 
+def test_match_info_tick_projects_to_now(client):
+    # Reads project to now. The metadata reads (GET /v1/matches/{id}, /v1/arena, list)
+    # must report the live, wall-clock-advanced tick, not the stale stored 0 that only
+    # changes on a write. Before this, those endpoints read tick 0 for a running match
+    # while /scene already reported the real tick.
+    mid = client.post("/v1/matches",
+                      json={"game_id": "skirmish", "config": {"grid": 11}, "autostart": False},
+                      headers=_admin_headers()).json()["match_id"]
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H1)
+    client.post(f"/v1/matches/{mid}/join", json={}, headers=H2)
+    client.post(f"/v1/matches/{mid}/start", json={}, headers=H1)
+    assert client.get(f"/v1/matches/{mid}").json()["tick"] == 0       # just started
+
+    NOW[0] += 5.0                                                     # 5 s = 50 ticks at 10 Hz
+    info_tick = client.get(f"/v1/matches/{mid}").json()["tick"]
+    arena_tick = client.get("/v1/arena").json()["tick"]
+    list_tick = client.get("/v1/matches").json()[0]["tick"]
+    scene_tick = client.get(f"/v1/matches/{mid}/scene").json()["tick"]
+    assert info_tick > 0                                              # projected, not the stale 0
+    assert info_tick == arena_tick == list_tick == scene_tick        # every read agrees
+
+
 def test_end_round_is_admin_only_and_advances_a_bout(client):
     mid = client.post("/v1/matches",
                       json={"game_id": "skirmish", "config": {"grid": 11}, "autostart": False},

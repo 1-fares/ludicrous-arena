@@ -386,6 +386,23 @@ class Engine:
             "result": (result.model_dump() if result else None),
         }
 
+    def get_info_projected(self, match_id: str) -> MatchInfo:
+        """Match metadata with ``tick``/``phase``/``result`` projected to now, so a
+        metadata read agrees with the scene and state reads instead of reporting a stale
+        stored tick. ``MatchInfo.tick`` is only persisted on a write (create/reset/finish),
+        not on every action, so without this a running match reports tick 0 the whole time
+        while ``GET .../scene`` reports the real, wall-clock-advanced tick. Lazy-finalizes
+        a match that has reached its end (exactly like the scene/state reads), so every read
+        surface sees the same terminal result; like every read it does not otherwise persist."""
+        game, info, state, tick, result, _, _ = self._project(match_id)
+        if state is not None and info.phase == MatchPhase.running:
+            self._lazy_finalize(match_id, result, tick, game, state)
+            info.tick = tick
+            if result is not None:
+                info.phase = MatchPhase.finished
+                info.result = result
+        return info
+
     def scene_view(self, match_id: str) -> dict[str, Any]:
         """Full spectator render. Public (no auth); spectating is omniscient."""
         game, info, state, tick, result, _, _ = self._project(match_id)

@@ -178,7 +178,10 @@ def list_matches(
     spectator UI lists everything. Match creation is admin-only, so agents join, not
     create."""
     phases = {p.strip() for p in phase.split(",")} if phase else None
-    return ENGINE.list_matches(phases=phases, game_id=game_id)
+    # Project each match's tick/phase/result to now (the stored meta tick only advances on
+    # a write), so the list agrees with the scene/state reads instead of showing tick 0.
+    return [ENGINE.get_info_projected(m.match_id)
+            for m in ENGINE.list_matches(phases=phases, game_id=game_id)]
 
 
 @app.get("/v1/arena", response_model=MatchInfo, tags=["discovery"],
@@ -193,7 +196,9 @@ def get_arena() -> Any:
     info = ENGINE.current_match()
     if info is None:
         return Response(status_code=204)
-    return info
+    # Project tick/phase/result to now so the resolver agrees with the scene/state reads
+    # (the stored meta tick only advances on a write, so a running match would read 0).
+    return ENGINE.get_info_projected(info.match_id)
 
 
 # -- match lifecycle --------------------------------------------------------
@@ -219,10 +224,10 @@ def create_match(req: CreateMatchRequest,
 @app.get("/v1/matches/{match_id}", response_model=MatchInfo, tags=["match lifecycle"],
          summary="Get a match", responses={**E_NOTFOUND})
 def get_match(match_id: str = _MATCH_ID) -> MatchInfo:
-    """Full metadata for one match: phase, roster, config, and `result` once it is
-    finished. No auth."""
+    """Full metadata for one match: phase, roster, config, `tick` (projected to now),
+    and `result` once it is finished. No auth."""
     try:
-        return ENGINE.get_info(match_id)
+        return ENGINE.get_info_projected(match_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0] if e.args else "not found")
 

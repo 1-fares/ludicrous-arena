@@ -157,7 +157,10 @@ you collapsed, and `you.fell_tick` records when, for the rest of that round.
 
 ### `GET /v1/matches/{match_id}`
 Match metadata: phase, tick, roster, `config`, `generation`, and `result` once
-finished. No auth. `config` is the **fully resolved** config (the game's defaults
+finished. No auth. Like every read, `phase`, `tick`, and `result` are **projected to
+now** (the world is fast-forwarded by elapsed wall-clock time in memory), so a running
+match reports its real current tick and this read agrees with `GET .../scene` and
+`GET .../state`. `config` is the **fully resolved** config (the game's defaults
 merged with any overrides), so you can read the real `grid`, `fire_range`, `hearts`,
 etc. off the match instead of guessing the schema defaults. `generation` starts at 0
 and increments on every reset, so a bot polling a reused room id can tell a fresh
