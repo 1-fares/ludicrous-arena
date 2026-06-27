@@ -12,6 +12,8 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 // API base: explicit ?api= wins; otherwise localhost for local dev, and the
 // production API subdomain when served from anywhere else.
@@ -80,8 +82,14 @@ const composer = new EffectComposer(
   new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }),
 );
 composer.addPass(new RenderPass(scene, camera));
-composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.7, 0.5, 0.85));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.82));
 composer.addPass(new OutputPass());
+
+// Image-based lighting: a procedural room env map gives the Standard materials real
+// reflections and a soft sheen (no external HDRI, one-time cost at init), so the floor
+// and blocks read as lacquered surfaces instead of flat matte primitives.
+const _pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = _pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
 function resize() {
   const w = innerWidth, h = innerHeight;
@@ -360,7 +368,7 @@ function makeSkirmishRenderer() {
     // One thin tile per cell, top flush with y=0. The 0.96 width leaves a dark gap that
     // reads as the old grid, and the box thickness gives holes a visible lip when a
     // neighbour falls away. Geometry and the solid material are shared across tiles.
-    tileGeo = new THREE.BoxGeometry(0.96, TILE_H, 0.96);
+    tileGeo = new RoundedBoxGeometry(0.96, TILE_H, 0.96, 2, 0.05);
     solidMat = new THREE.MeshStandardMaterial({ color: 0x252f3d, roughness: 0.9, metalness: 0.1 });
     for (let x = 0; x < g; x++) for (let y = 0; y < g; y++) {
       const m = new THREE.Mesh(tileGeo, solidMat);
@@ -375,7 +383,7 @@ function makeSkirmishRenderer() {
     // Wall boxes share one geometry and one solid material; individual wall meshes are
     // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
-    wallGeo = new THREE.BoxGeometry(0.98, WALL_H, 0.98);
+    wallGeo = new RoundedBoxGeometry(0.98, WALL_H, 0.98, 2, 0.06);
     wallSolidMat = new THREE.MeshStandardMaterial({ color: 0xc8d0e0, roughness: 0.4, metalness: 0.15 });
     root.add(wallGroup);
   }
@@ -459,7 +467,8 @@ function makeSkirmishRenderer() {
 
   function makeFighter(color) {
     const grp = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.1 });
+    const mat = new THREE.MeshStandardMaterial({
+      color, roughness: 0.5, metalness: 0.1, emissive: color, emissiveIntensity: 0.4 });
     const legs = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.42, 0.26), mat);
     legs.position.y = 0.21; legs.castShadow = true; grp.add(legs);
     const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.34, 4, 8), mat);

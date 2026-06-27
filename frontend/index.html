@@ -85,9 +85,17 @@
     #toasts .toast.show { opacity: 1; transform: none; }
     #toasts .toast.leave { border-left-color: #ff7c7c; }
   </style>
+  <style>
+    /* Broadcast-style vignette: darkens the corners to frame the action. It sits above the
+       WebGL canvas but below the HUD (raised here), and never takes pointer events. */
+    #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: radial-gradient(ellipse at center, transparent 52%, rgba(4,7,12,0.62) 100%); }
+    #hud, #scoreboard, #hint, #toasts, #banner { z-index: 10; }
+  </style>
 </head>
 <body>
   <div id="scene"></div>
+  <div id="vignette"></div>
   <div id="hud">
     <span class="brand">LUDICROUS ARENA</span>
     <span id="adminbar" hidden>
@@ -115,6 +123,6 @@
       "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   } }
   </script>
-  <script type="module" src="./js/viewer.js?v=23"></script>
+  <script type="module" src="./js/viewer.js?v=art2"></script>
 </body>
 </html>
