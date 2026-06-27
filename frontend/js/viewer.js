@@ -82,7 +82,9 @@ const composer = new EffectComposer(
   new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }),
 );
 composer.addPass(new RenderPass(scene, camera));
-composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.82));
+// Restrained bloom: high threshold so ONLY the genuinely hot collapse cracks glow, not the
+// lit blocks/fighters/labels (over-bloom was washing the scene out and hurting readability).
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.5, 0.9));
 composer.addPass(new OutputPass());
 
 // Image-based lighting: a procedural room env map gives the Standard materials real
@@ -168,13 +170,15 @@ function makeLabel(text, color) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   const cx = cv.width / 2;
-  ctx.fillStyle = "rgba(8,10,14,0.72)";
+  ctx.fillStyle = "rgba(6,8,12,0.9)";                 // near-opaque backing so text always pops
   ctx.fillRect(cx - (textW + pad) / 2, 8, textW + pad, 48);
   ctx.fillStyle = hex(color);
   ctx.fillText(text, cx, 33);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  // toneMapped:false keeps the label at its true canvas colours, the ACES tone map + bloom
+  // were dimming and hazing the names. depthTest:false keeps them on top.
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, toneMapped: false }));
   // Constant on-screen text height; width follows the canvas aspect so the name is
   // never stretched or clipped, however long it is. (256x64 -> 2.4x0.6, as before.)
   const h = 0.6;
@@ -369,7 +373,7 @@ function makeSkirmishRenderer() {
     // reads as the old grid, and the box thickness gives holes a visible lip when a
     // neighbour falls away. Geometry and the solid material are shared across tiles.
     tileGeo = new RoundedBoxGeometry(0.96, TILE_H, 0.96, 2, 0.05);
-    solidMat = new THREE.MeshStandardMaterial({ color: 0x252f3d, roughness: 0.9, metalness: 0.1 });
+    solidMat = new THREE.MeshStandardMaterial({ color: 0x252f3d, roughness: 0.95, metalness: 0.0, envMapIntensity: 0.2 });
     for (let x = 0; x < g; x++) for (let y = 0; y < g; y++) {
       const m = new THREE.Mesh(tileGeo, solidMat);
       m.position.set(x, -TILE_H / 2, y);
@@ -384,7 +388,7 @@ function makeSkirmishRenderer() {
     // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
     wallGeo = new RoundedBoxGeometry(0.98, WALL_H, 0.98, 2, 0.06);
-    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0xc8d0e0, roughness: 0.4, metalness: 0.15 });
+    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0x97a3b8, roughness: 0.85, metalness: 0.0, envMapIntensity: 0.25 });
     root.add(wallGroup);
   }
 
@@ -467,8 +471,11 @@ function makeSkirmishRenderer() {
 
   function makeFighter(color) {
     const grp = new THREE.Group();
+    // Coloured but not glowing: a faint emissive floor keeps the shadowed side legible
+    // without the bloom-catching glow that made the fighters hard to look at.
     const mat = new THREE.MeshStandardMaterial({
-      color, roughness: 0.5, metalness: 0.1, emissive: color, emissiveIntensity: 0.4 });
+      color, roughness: 0.6, metalness: 0.05, envMapIntensity: 0.25,
+      emissive: color, emissiveIntensity: 0.12 });
     const legs = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.42, 0.26), mat);
     legs.position.y = 0.21; legs.castShadow = true; grp.add(legs);
     const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.34, 4, 8), mat);
