@@ -8,6 +8,10 @@
 // between polls.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 // API base: explicit ?api= wins; otherwise localhost for local dev, and the
 // production API subdomain when served from anywhere else.
@@ -53,19 +57,36 @@ controls.addEventListener("start", () => { controls.autoRotate = false; });
 const root = new THREE.Group();
 scene.add(root);
 
-scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x20242e, 0.85));
-const key = new THREE.DirectionalLight(0xffffff, 1.6);
-key.position.set(18, 40, 14);
+// Lighting: a soft sky fill, one warm shadow-casting key, and a cool rim that lifts
+// fighters off the dark background. No AmbientLight (it flattens contrast). The key/rim
+// positions, targets, and the shadow frustum are sized to the board in frameOnce().
+scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x1a1f2e, 0.5));
+const key = new THREE.DirectionalLight(0xfff5e0, 1.4);
 key.castShadow = true;
 key.shadow.mapSize.set(2048, 2048);
-Object.assign(key.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 140 });
-key.shadow.bias = -0.0004;
+key.shadow.bias = -0.0005;
+key.shadow.normalBias = 0.02;
 scene.add(key);
-scene.add(new THREE.AmbientLight(0x3a4658, 0.55));
+scene.add(key.target);
+const rim = new THREE.DirectionalLight(0x6070ff, 0.45);
+scene.add(rim);
+scene.add(rim.target);
+
+// Post-processing: render to an HDR, multisampled target so bloom acts on the bright
+// emissives (hot cracks, bullets, beacons) and edges stay anti-aliased; OutputPass applies
+// the ACES tone map + sRGB at the end.
+const composer = new EffectComposer(
+  renderer,
+  new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }),
+);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.7, 0.5, 0.85));
+composer.addPass(new OutputPass());
 
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h);
+  composer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -76,9 +97,19 @@ let camSize = 20, framed = false;
 function frameOnce() {
   if (framed) return;
   framed = true;
-  controls.target.set(camSize / 2, 0.5, camSize / 2);
-  camera.position.set(camSize / 2, camSize * 1.0, camSize * 1.35);
+  const c = camSize / 2;
+  controls.target.set(c, 0.5, c);
+  camera.position.set(c, camSize * 1.0, camSize * 1.35);
   controls.update();
+  // Aim the key + rim at the board centre and size the shadow frustum to the grid so the
+  // shadow map is spent on the board (crisp) rather than empty space around it.
+  key.position.set(c + camSize * 0.7, camSize * 1.7, c + camSize * 0.5);
+  key.target.position.set(c, 0, c);
+  rim.position.set(c - camSize * 0.6, camSize * 0.5, c - camSize * 0.7);
+  rim.target.position.set(c, 0, c);
+  const r = camSize * 0.85;
+  Object.assign(key.shadow.camera, { left: -r, right: r, top: r, bottom: -r, near: 1, far: camSize * 4 });
+  key.shadow.camera.updateProjectionMatrix();
 }
 
 const clock = new THREE.Clock();
@@ -87,7 +118,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);   // clamp so a tab regaining focus does not jump effects
   RENDERERS[activeGame]?.lerp?.(dt);   // only the active game's meshes need easing
   controls.update();
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 // Free the GPU resources of a subtree before detaching it. three.js does not do
@@ -330,7 +361,7 @@ function makeSkirmishRenderer() {
     // reads as the old grid, and the box thickness gives holes a visible lip when a
     // neighbour falls away. Geometry and the solid material are shared across tiles.
     tileGeo = new THREE.BoxGeometry(0.96, TILE_H, 0.96);
-    solidMat = new THREE.MeshStandardMaterial({ color: 0x3b4660, roughness: 0.92 });
+    solidMat = new THREE.MeshStandardMaterial({ color: 0x252f3d, roughness: 0.9, metalness: 0.1 });
     for (let x = 0; x < g; x++) for (let y = 0; y < g; y++) {
       const m = new THREE.Mesh(tileGeo, solidMat);
       m.position.set(x, -TILE_H / 2, y);
@@ -345,7 +376,7 @@ function makeSkirmishRenderer() {
     // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
     wallGeo = new THREE.BoxGeometry(0.98, WALL_H, 0.98);
-    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0x9fb0cc, roughness: 0.75, metalness: 0.05 });
+    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0xc8d0e0, roughness: 0.4, metalness: 0.15 });
     root.add(wallGroup);
   }
 
