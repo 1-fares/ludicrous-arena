@@ -115,20 +115,31 @@ const hex = (c) => "#" + (c).toString(16).padStart(6, "0");
 // A floating text label (agent name) as a sprite with a canvas texture.
 function makeLabel(text, color) {
   const cv = document.createElement("canvas");
-  cv.width = 256; cv.height = 64;
   const ctx = cv.getContext("2d");
-  ctx.font = "bold 34px ui-monospace, monospace";
+  const font = "bold 34px ui-monospace, monospace";
+  // Size the canvas to the actual text so long names are never clipped. Measure with
+  // the real font first, then size; resizing the canvas resets the 2d context, so the
+  // draw state is set again afterwards.
+  ctx.font = font;
+  const textW = Math.ceil(ctx.measureText(text).width);
+  const pad = 28;
+  cv.width = Math.max(128, textW + pad * 2);
+  cv.height = 64;
+  ctx.font = font;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
+  const cx = cv.width / 2;
   ctx.fillStyle = "rgba(8,10,14,0.72)";
-  const w = ctx.measureText(text).width + 28;
-  ctx.fillRect(128 - w / 2, 8, w, 48);
+  ctx.fillRect(cx - (textW + pad) / 2, 8, textW + pad, 48);
   ctx.fillStyle = hex(color);
-  ctx.fillText(text, 128, 33);
+  ctx.fillText(text, cx, 33);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  spr.scale.set(2.4, 0.6, 1);
+  // Constant on-screen text height; width follows the canvas aspect so the name is
+  // never stretched or clipped, however long it is. (256x64 -> 2.4x0.6, as before.)
+  const h = 0.6;
+  spr.scale.set((cv.width / cv.height) * h, h, 1);
   return spr;
 }
 
