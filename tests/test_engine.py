@@ -367,6 +367,59 @@ def test_current_match_prefers_running_over_finished():
     assert eng.current_match().match_id == "run-1"
 
 
+def test_endless_match_catchup_is_bounded():
+    # Regression (the stale-match brick): an endless real-time match (skirmish with
+    # rounds_to_win=0 never fires a result) must not re-simulate an unbounded idle gap
+    # on every read. A read after a long abandonment advances at most _MAX_CATCHUP
+    # ticks, so the projection stays cheap and the hot read endpoints cannot time out.
+    from arena.engine import _MAX_CATCHUP
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11, "rounds_to_win": 0}, autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "A", None)
+    eng.join_match(mid, "u2", "B", None)
+    eng.start_match(mid)
+    # Jump the clock two days ahead: raw elapsed would be ~1.7M ticks at 10 Hz.
+    now[0] += 2 * 24 * 3600.0
+    scene = eng.scene_view(mid)
+    assert scene["phase"] == "running"            # endless: never finishes on its own
+    assert scene["tick"] <= _MAX_CATCHUP          # catch-up bounded, not millions
+    # Reads do not persist, so a second read re-projects from the same seed and agrees
+    # (deterministic), and is still bounded rather than bricked.
+    assert eng.scene_view(mid)["tick"] == scene["tick"]
+
+
+def test_action_after_long_idle_snaps_wall_clock():
+    # When the idle gap is clamped, the next action resumes the match at "now" rather
+    # than crawling forward one _MAX_CATCHUP bound per action: after one action, the
+    # persisted wall baseline is ~now, so no large catch-up remains.
+    from arena.engine import _MAX_CATCHUP
+    eng, now = _engine()
+    info = eng.create_match("skirmish", {"grid": 11, "rounds_to_win": 0}, autostart=False)
+    mid = info.match_id
+    eng.join_match(mid, "u1", "A", None)
+    eng.join_match(mid, "u2", "B", None)
+    eng.start_match(mid)
+    now[0] += 2 * 24 * 3600.0
+    eng.submit_actions(mid, "u1", [{"type": "wait"}])   # clamped catch-up, then snap
+    rec, _ = eng._store.get_match_state(mid)
+    assert abs(rec.last_wall_ms - eng._now_ms()) < 1000     # baseline snapped to now
+    persisted_tick = rec.last_tick
+    # The next read has essentially nothing to catch up: no second cap-sized jump.
+    assert eng.scene_view(mid)["tick"] - persisted_tick < _MAX_CATCHUP
+
+
+def test_finite_match_still_finalizes_on_idle_read():
+    # The cap must stay above the largest finite horizon so the designed behavior
+    # holds: a finite match that hit its time limit while nobody watched finalizes on
+    # the next read. Deathmatch times out at time_limit_ticks (default 6000 < cap).
+    eng, now = _engine()
+    mid = _start_deathmatch(eng, score_limit=99)  # unreachable by kills; only the timer ends it
+    now[0] += 700.0                               # 7000 ticks > 6000-tick timeout
+    scene = eng.scene_view(mid)
+    assert scene["phase"] == "finished"           # reached its time limit on an idle read
+
+
 def test_lobby_shows_board_and_players_before_start():
     import pytest
     eng, now = _engine()

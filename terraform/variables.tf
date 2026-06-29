@@ -36,9 +36,9 @@ variable "lambda_memory" {
 }
 
 variable "lambda_timeout" {
-  description = "Lambda timeout (seconds). Bounds a single catch-up; matches' time limits keep work well under this."
+  description = "Lambda timeout (seconds). Bounds a single catch-up. The engine caps catch-up at _MAX_CATCHUP ticks; a full cap of the heaviest game (skirmish) must simulate well under this, with margin for cold start, decode, and DynamoDB IO."
   type        = number
-  default     = 15
+  default     = 30
 }
 
 variable "api_enabled" {

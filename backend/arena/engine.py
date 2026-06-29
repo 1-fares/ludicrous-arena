@@ -13,7 +13,13 @@ authoritative state of a match sits in DynamoDB; the engine advances it lazily:
 Because games are deterministic, "the world at time T" is a pure function of the
 last persisted state and the elapsed wall-clock time, so a read computing it in
 memory and an action persisting it agree. Catch-up stops as soon as ``result``
-fires, so an idle match cannot run away (its time limit bounds the work).
+fires, so a finite match cannot run away (its time limit bounds the work). An
+**endless** match (e.g. skirmish with ``rounds_to_win=0``) never fires a result,
+so a fixed per-call cap (``_MAX_CATCHUP``) bounds the work instead: a match nobody
+has touched for longer than that many ticks is treated as paused at the bound
+rather than fast-forwarded across the whole idle gap. Without the cap, an
+abandoned endless match would re-simulate every tick since it was last persisted
+on *every* read (days of wall clock at the tick rate), timing out the Lambda.
 
 Note on finished matches: once a match ends, META holds the terminal result and
 STATE is no longer advanced. Reads still recompute ``result`` from STATE, but
@@ -40,7 +46,21 @@ from arena.game import Game
 from arena.models import MatchInfo, MatchPhase, MatchResult, PlayerSlot
 from arena.store import Conflict, StateRecord, Store
 
-_MAX_CATCHUP = 100_000  # safety valve: never fast-forward more ticks than this in one call
+# Cap on how many ticks a single read/action will fast-forward. It exists to bound
+# *endless* matches: a real-time game advances by wall-clock elapsed time on each
+# read, but a game that never fires a ``result`` (skirmish defaults to endless,
+# ``rounds_to_win=0``) would otherwise re-simulate the entire idle gap on every read
+# of an abandoned running match (days -> millions of ticks) and time out the Lambda.
+# Must be a fixed tick count, not a wall-clock compute budget: every caller has to
+# project the identical world for the read/action agreement to hold, and a
+# time-based budget would make the projected tick depend on how fast the host ran.
+# Sized above the largest finite-match horizon (deathmatch ``time_limit_ticks``
+# defaults to 6000) so a finite match still finalizes on an idle read, yet low
+# enough that a full cap of the heaviest game (skirmish) simulates well within the
+# Lambda timeout. A match idle past this many ticks is treated as paused at the
+# bound; the next write snaps its wall clock forward (see submit_actions).
+_MAX_CATCHUP = 8000
+_MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
 _MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
 _RETRY = 6              # optimistic-write attempts before giving up
 
@@ -284,14 +304,18 @@ class Engine:
                 raise ValueError("match has not started")
             rec, version = loaded
             state = game.decode_state(rec.state)
-            tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
+            target, clamped = self._catchup_target(game, rec)
+            tick, result = self._advance(game, state, rec.last_tick, target)
             if result is not None:
                 self._lazy_finalize(match_id, result, tick)
                 raise ValueError("match finished")
             if not hasattr(game, "end_round"):
                 return self.get_info(match_id)
             game.end_round(state)
-            new_wall = rec.last_wall_ms + round((tick - rec.last_tick) * 1000.0 / game.meta.tick_rate)
+            # Snap to now if the idle gap was clamped (see submit_actions), else carry
+            # the wall clock forward by exactly the ticks consumed.
+            new_wall = (self._now_ms() if clamped else
+                        rec.last_wall_ms + round((tick - rec.last_tick) * 1000.0 / game.meta.tick_rate))
             new_rec = StateRecord(state=game.encode_state(state), last_tick=tick, last_wall_ms=new_wall)
             try:
                 self._store.put_match_state(match_id, new_rec, version)
@@ -303,11 +327,23 @@ class Engine:
     # -- simulation core ---------------------------------------------------
 
     def _target_tick(self, game: Game, rec: StateRecord) -> int:
-        """Tick the world should be at right now, given the wall clock."""
+        """Tick the world should be at right now, given the wall clock (bounded)."""
+        return self._catchup_target(game, rec)[0]
+
+    def _catchup_target(self, game: Game, rec: StateRecord) -> tuple[int, bool]:
+        """``(target_tick, clamped)``: the tick the world should be at now, but never
+        more than ``_MAX_CATCHUP`` ticks past the last persisted tick. ``clamped`` is
+        True when the real elapsed gap exceeded that bound, so a writer can snap the
+        wall-clock baseline to now (intentionally skipping the unobserved idle) instead
+        of crawling forward one bound per action. Turn-paced games never advance on the
+        wall clock, so their target is always the stored tick."""
         if not game.meta.realtime:
-            return rec.last_tick
+            return rec.last_tick, False
         elapsed_s = max(0, self._now_ms() - rec.last_wall_ms) / 1000.0
-        return rec.last_tick + int(elapsed_s * game.meta.tick_rate)
+        raw = int(elapsed_s * game.meta.tick_rate)
+        if raw > _MAX_CATCHUP:
+            return rec.last_tick + _MAX_CATCHUP, True
+        return rec.last_tick + raw, False
 
     def _advance(self, game: Game, state: Any, from_tick: int, to_tick: int):
         """Fast-forward ``state`` from ``from_tick`` to ``to_tick`` (or until the
@@ -443,7 +479,8 @@ class Engine:
                 raise ValueError("match has not started")
             rec, version = loaded
             state = game.decode_state(rec.state)
-            tick, result = self._advance(game, state, rec.last_tick, self._target_tick(game, rec))
+            target, clamped = self._catchup_target(game, rec)
+            tick, result = self._advance(game, state, rec.last_tick, target)
             if result is not None:
                 self._lazy_finalize(match_id, result, tick)
                 raise ValueError("match finished")
@@ -459,6 +496,12 @@ class Engine:
             if not game.meta.realtime:
                 game.tick(state, 1.0 / rate)
                 tick += 1
+                new_wall = self._now_ms()
+            elif clamped:
+                # The idle gap exceeded _MAX_CATCHUP: we simulated only the capped
+                # window, so snap the baseline to now and skip the unobserved excess.
+                # Otherwise the match would crawl forward one bound per action, never
+                # catching up to real time after a long abandonment.
                 new_wall = self._now_ms()
             else:
                 # Carry the wall clock forward by exactly the ticks consumed, not

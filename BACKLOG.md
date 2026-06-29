@@ -12,17 +12,19 @@ Ordered roughly by when it will start to hurt. Nothing here blocks v1.
 - Idle catch-up cost: a read re-simulates from the last persisted tick to now.
   Bounded by the match time limit, but a very long tick budget could make a read
   heavy. Consider persisting opportunistically on reads past a threshold.
-- **Unbounded catch-up on endless matches (observed, bricks the API).** Catch-up
-  stops when `result` fires, but an **endless** match never fires one. Skirmish's
-  default is `rounds_to_win=0` (endless), so a running skirmish match left
-  abandoned makes every later read fast-forward all the elapsed wall-clock time
-  with no terminating `result`. After ~2 days idle that is ~1.7M ticks at 10 Hz,
-  which exceeds the 15 s Lambda timeout: `/v1/arena` and `/v1/matches` both load
-  the match and 500. Hit on 2026-06-29 (stale match `0043ef2c5680` from 06-27);
-  cleared by deleting its `MATCH#`/`INDEX#` items directly. Fix options: cap
-  catch-up ticks per read (project to a bounded horizon), expire matches via the
-  DynamoDB TTL above, or auto-finalize a running match older than some wall-clock
-  bound. The TTL item below would also have prevented this.
+- **Unbounded catch-up on endless matches (fixed 2026-06-29).** Catch-up stops
+  when `result` fires, but an **endless** match (skirmish default `rounds_to_win=0`)
+  never fires one, so a running match left abandoned made every later read
+  fast-forward the whole elapsed wall-clock gap. After ~2 days idle that is ~1.7M
+  ticks at 10 Hz, exceeding the (then 15 s) Lambda timeout: `/v1/arena` and
+  `/v1/matches` both 500. Hit on a stale match (`0043ef2c5680` from 06-27); cleared
+  by deleting its `MATCH#`/`INDEX#` items directly. Fixed by capping catch-up at
+  `_MAX_CATCHUP` ticks (engine.py) above the largest finite horizon so finite
+  matches still finalize on an idle read, snapping the wall clock forward on a
+  clamped write, and raising the Lambda timeout to 30 s. Remaining (still worth
+  doing): an abandoned endless match now reads in bounded time but still pays a
+  full-cap simulation per read until it is reset or cleaned up. Auto-finalize or
+  TTL-expire an idle running match (see the GC item above) to drop that to zero.
 
 ## Persistence
 - Replays: append each tick's render to an S3 object (JSONL of frames) so finished
