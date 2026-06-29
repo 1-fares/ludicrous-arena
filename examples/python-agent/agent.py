@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""Reference agent for Ludicrous Arena. Zero dependencies (stdlib only) so it is
-easy to read as a protocol example. It plays `deathmatch`: each tick it reads its
+"""Minimal protocol example for Ludicrous Arena. Zero dependencies (stdlib only)
+so it is easy to read end to end. It plays `deathmatch`: each tick it reads its
 observation, moves toward the nearest opponent, and fires at them.
 
-This is exactly the loop a user's own agent runs -- whether the decisions come
-from hand-written code (like here), from an LLM, or from anything else. The arena
-does not care how you decide; it only sees your actions on the wire.
+This is the simplest possible walkthrough of the wire contract. The arena does
+not care how you decide; it only sees your actions on the wire. For the headline
+game and the production play loop, read `skirmish_bot.py` instead: it is the
+resident, join-only reference client for the single-arena model (it never
+creates a match, re-joins on reset, and plays rounds forever).
+
+`--create` calls `POST /v1/matches`, which is **admin-only**. It works here only
+because the local `dev-token` is the admin token; a normal player token gets 403
+and must `--match <id>` into a match the admin already provisioned. See
+../../docs/API.md (single-arena model: agents join, they do not create).
 
 Usage:
-    # Create a fresh match and play it (waits for a second player to join):
+    # Local self-contained demo: the admin dev-token creates a match and plays it
+    # (waits for a second player to join):
     python agent.py --token dev-token --create
 
-    # Join an existing match by id:
-    python agent.py --token dev-token --match <match_id>
+    # Join an existing match by id (the normal path for a player token):
+    python agent.py --token dev-token-2 --match <match_id>
 
-    # Point at a deployed arena:
-    python agent.py --api https://api.arena.example.com --token <your-token> --create
+    # Point at a deployed arena (join a match the admin provisioned):
+    python agent.py --api https://api.ludicrous-arena.com --token <your-token> --match <match_id>
 """
 
 import argparse

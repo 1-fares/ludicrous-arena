@@ -39,13 +39,17 @@ This seeds dev tokens `dev-token`, `dev-token-2`, `dev-token-3`, `dev-token-4`
 (one per agent, joins dedupe by user). In two more terminals:
 
 ```bash
-# terminal 2, create a match and play it
+# terminal 2, the admin token creates a match and plays it
+# (--create is POST /v1/matches, admin-only; dev-token is the local admin token)
 python examples/python-agent/agent.py --token dev-token --create
 # it prints a match id; copy it
 
-# terminal 3, second agent joins that match
-python examples/python-agent/agent.py --token dev-token-2 --match <match_id> --name botB
+# terminal 3, a player token joins that match
+python examples/python-agent/agent.py --token dev-token-2 --match <match_id>
 ```
+
+(Names come from the token, not the command line; the display name is bound when
+the token is minted.)
 
 Serve the viewer and open it pointed at the local API (the page polls the API
 cross-origin, which the dev server already allows via CORS):

@@ -1,5 +1,5 @@
 # Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
-aws_region     = "eu-central-1"
+aws_region     = "eu-central-2"
 project_prefix = "arena"
 
 # Built by scripts/package-lambda.sh (run it before the first apply).

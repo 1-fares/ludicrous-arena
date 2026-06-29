@@ -124,9 +124,10 @@ in [docs/GAMES.md](docs/GAMES.md#adding-a-game). Non-negotiable rules:
   injected clock for the simulation; TestClient for the HTTP surface. Keep all
   three green. No AWS needed (MemoryStore mirrors DynamoStore semantics).
 - Frontend stays buildless: add a renderer to `viewer.js` keyed by `game_id`.
-- Terraform default region `eu-central-1`; state local until the S3 backend in
-  `main.tf` is enabled. Run `package-lambda.sh` before the first `terraform apply`
-  (the Lambda resource needs the zip to exist).
+- Terraform default region `eu-central-2` (Zurich); remote state is in the S3
+  backend in `main.tf` (bucket `arena-tfstate-ACCOUNT_ID`, eu-central-2). Run
+  `package-lambda.sh` before the first `terraform apply` (the Lambda resource needs
+  the zip to exist). Deployment topology and domains are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - **API kill switch**: `terraform/api-switch.auto.tfvars` sets `api_enabled`. `false`
   pins the Lambda's `reserved_concurrent_executions` to 0, so API Gateway cannot
   invoke it: wrong-token and random internet requests run no code and read no
