@@ -57,21 +57,30 @@ META = GameMeta(
     },
     observation_schema={
         "type": "object",
-        "description": "Partial view: only cells within `sight` of your pawn.",
+        "description": "Partial view: only cells within `sight` of your pawn. Coordinate frame: origin (0,0) is the top-left, x grows east (right), y grows south (down); the exit is the bottom-right cell (grid-1, grid-1). Move N decreases y, S increases y, E increases x, W decreases x. Agents see only their own surroundings, so coordinate the team out of band.",
         "properties": {
-            "grid": {"type": "integer"},
+            "grid": {"type": "integer", "description": "Side length; cells are 0..grid-1 on each axis."},
             "sight": {"type": "integer", "description": "Fog radius (cells visible around you)."},
+            "time_left": {"type": "integer", "description": "Ticks remaining before the timer expires and the team loses. The tick rate is 5/second."},
             "self": {"type": "object", "properties": {
+                "player_id": {"type": "string", "description": "Your own pawn id (matches an id in another agent's nearby_players, and the envelope seat.player_id)."},
                 "x": {"type": "integer"}, "y": {"type": "integer"},
-                "carrying": {"type": "integer", "description": "Fragments held but not yet delivered."}}},
+                "carrying": {"type": "integer", "description": "Fragments you hold but have not yet delivered to the exit."}}},
             "visible": {"type": "object", "properties": {
-                "fragments": {"type": "array", "items": {"type": "object", "properties": {
+                "fragments": {"type": "array", "description": "Uncollected fragment cells within sight.", "items": {"type": "object", "properties": {
                     "x": {"type": "integer"}, "y": {"type": "integer"}}}},
-                "exit_visible": {"type": "boolean"},
-                "nearby_players": {"type": "array", "items": {"type": "object", "properties": {
-                    "id": {"type": "string"}, "x": {"type": "integer"}, "y": {"type": "integer"}}}}}},
-            "team": {"type": "object", "properties": {
-                "delivered": {"type": "integer"}, "total": {"type": "integer"}}},
+                "exit_visible": {"type": "boolean", "description": "True when the exit cell is within sight."},
+                "exit": {"type": "object", "description": "The exit cell, present only when exit_visible is true. (It is always (grid-1, grid-1).)",
+                         "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}},
+                "nearby_players": {"type": "array", "description": "OTHER pawns within sight (you are excluded).", "items": {"type": "object", "properties": {
+                    "id": {"type": "string"}, "name": {"type": "string"},
+                    "x": {"type": "integer"}, "y": {"type": "integer"},
+                    "carrying": {"type": "integer", "description": "Fragments that teammate is carrying."}}}}}},
+            "team": {"type": "object", "description": "Global team progress (no position leak). delivered + carried + uncollected == total.", "properties": {
+                "delivered": {"type": "integer", "description": "Fragments carried out through the exit so far."},
+                "total": {"type": "integer", "description": "Fragments to extract to win."},
+                "carried": {"type": "integer", "description": "Fragments currently held by the team (sum across all pawns), not yet delivered."},
+                "uncollected": {"type": "integer", "description": "Fragments still lying on the floor somewhere, not yet picked up."}}},
         },
     },
 )
@@ -147,23 +156,37 @@ class Lockdown:
         state.pending = {}
         state.tick += 1
 
-    def _visible(self, state: State, cx: int, cy: int) -> dict[str, Any]:
+    def _visible(self, state: State, me: str, cx: int, cy: int) -> dict[str, Any]:
         r = state.cfg["sight"]
         frags = [{"x": x, "y": y} for (x, y) in state.fragments
                  if abs(x - cx) <= r and abs(y - cy) <= r]
         exit_visible = abs(state.exit[0] - cx) <= r and abs(state.exit[1] - cy) <= r
-        others = [{"id": p.player_id, "x": p.x, "y": p.y} for p in state.pawns.values()
-                  if abs(p.x - cx) <= r and abs(p.y - cy) <= r]
-        return {"fragments": frags, "exit_visible": exit_visible, "nearby_players": others}
+        # nearby_players are OTHER pawns within sight (you are excluded). Include each
+        # one's carry count so the team can decide who should run fragments to the exit.
+        others = [{"id": p.player_id, "name": p.name, "x": p.x, "y": p.y, "carrying": p.carrying}
+                  for p in state.pawns.values()
+                  if p.player_id != me and abs(p.x - cx) <= r and abs(p.y - cy) <= r]
+        vis: dict[str, Any] = {"fragments": frags, "exit_visible": exit_visible,
+                               "nearby_players": others}
+        if exit_visible:    # give the actual cell, not just a boolean, so you can path to it
+            vis["exit"] = {"x": state.exit[0], "y": state.exit[1]}
+        return vis
 
     def observe(self, state: State, player_id: str) -> dict[str, Any]:
         p = state.pawns[player_id]
+        # Team aggregates are global progress, not a fog-of-war position leak: every
+        # fragment is either delivered, carried by someone, or still on the floor, so
+        # delivered + carried + uncollected == total. They let any one agent tell how
+        # many fragments are still out there without seeing where.
+        carried = sum(q.carrying for q in state.pawns.values())
         return {
             "grid": state.grid,
             "sight": state.cfg["sight"],
-            "self": {"x": p.x, "y": p.y, "carrying": p.carrying},
-            "visible": self._visible(state, p.x, p.y),
-            "team": {"delivered": state.delivered, "total": state.total},
+            "time_left": max(0, state.cfg["time_limit_ticks"] - state.tick),
+            "self": {"player_id": p.player_id, "x": p.x, "y": p.y, "carrying": p.carrying},
+            "visible": self._visible(state, player_id, p.x, p.y),
+            "team": {"delivered": state.delivered, "total": state.total,
+                     "carried": carried, "uncollected": len(state.fragments)},
         }
 
     def render(self, state: State) -> dict[str, Any]:

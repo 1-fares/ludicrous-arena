@@ -54,7 +54,7 @@ cooldowns gate how often you move or fire (one shot per second).
 - **Observation** (forward cone vision):
   ```json
   {
-    "you": {"x": 3, "y": 5, "facing": "E", "hearts": 3, "alive": true,
+    "you": {"name": "Hunter", "x": 3, "y": 5, "facing": "E", "hearts": 3, "alive": true,
             "can_move": true, "can_fire": true,
             "score": 1.35, "frags": 1, "territory": 0.35, "exposed": false,
             "camp_ticks": 4, "expose_at": 30,
@@ -76,6 +76,7 @@ cooldowns gate how often you move or fire (one shot per second).
     },
     "arena": {"collapsing": true, "round_elapsed": 130, "rings_total": 6, "keep_rings": 2,
               "safe_ring": 0, "next_fall_tick": 160, "center": [6, 6]},
+    "rules": {"fire_range": 4, "sight": 12, "fire_cooldown": 10, "move_cooldown": 3, "hearts": 3},
     "round": 7, "phase": "fighting",
     "match": {"round": 7, "rounds_to_win": 10, "round_wins": {"Hunter": 3, "Vega": 3}},
     "scores": {"Hunter": 1.35, "Vega": 0.2}
@@ -106,6 +107,11 @@ cooldowns gate how often you move or fire (one shot per second).
     (`ahead`/`right`/`behind`/`left`). React to it.
   - `can_move` and `can_fire` are **independent** cooldowns: you may fire while the
     move cooldown is active (shoot-and-scoot) and move while the gun reloads.
+  - **`you.name`** is your own display name (the same value as the envelope
+    `seat.name`). The `scores` and `match.round_wins` maps are keyed by display name,
+    so this is how you find yourself in them. **`rules`** echoes the combat constants
+    for this match (`fire_range`, `sight`, `fire_cooldown`, `move_cooldown`, `hearts`),
+    so the per-tick observation is self-contained without a separate config read.
   - **`cells[].decay` / `cells[].falls_in`** describe the collapsing arena (see below).
     `decay` is the crack stage of a cell (0 solid .. `decay_stages-1` about to fall);
     `falls_in` is ticks until it becomes void, or `null` if it never falls. Walls fall
@@ -187,8 +193,19 @@ agents see the whole arena.
     (normalised; magnitude is ignored).
   - `{"type": "fire", "angle": <radians>}`, fires a projectile; rejected while on
     cooldown or dead.
-- **Observation** (== render): `arena_size`, `players[]` (`id, name, x, y,
-  heading, hp, score, alive`), `projectiles[]` (`x, y`), `scores`.
+- **Observation**: the full arena (no fog) plus the fields a player needs to act.
+  `arena_size` (playfield is `[0, arena_size]` on both axes), `tick`, `players[]`
+  (`id, name, x, y, heading, hp, score, alive`), `projectiles[]` (`x, y, vx, vy,
+  owner`, velocity in units/second so a shot is dodgeable), `scores`, and:
+  - `you`: your own entity broken out, `{player_id, x, y, heading, hp, score, alive,
+    can_fire, cooldown, respawn_in}`. `cooldown` is ticks until your gun is ready,
+    `respawn_in` ticks until you respawn (both 0 when ready/alive); a spectator never
+    sees these.
+  - `rules`: match constants, `{score_limit, time_limit_ticks, move_speed,
+    projectile_speed, fire_cooldown, respawn_delay, hit_radius, hit_damage, max_hp}`,
+    so the observation is self-describing. Headings/angles are radians:
+    `heading = atan2(dy, dx)`, so to aim at `(tx, ty)` from `(x, y)` fire
+    `angle = atan2(ty - y, tx - x)`.
 - **Win**: first to `score_limit` kills; on timeout, highest score (ties share).
 
 Note: collision is sampled per tick, so very fast projectiles can tunnel past a
@@ -207,9 +224,17 @@ collaboration this whole project exists to provoke.
   `seed` (1).
 - **Actions**: `{"type": "move", "dir": "N" | "S" | "E" | "W"}`, step one cell.
   Moves resolve simultaneously at tick end regardless of submission order.
-- **Observation** (partial): `grid`, `sight`, `self` (`x, y, carrying`), `visible`
-  (`fragments[]`, `exit_visible`, `nearby_players[]` within `sight`), `team`
-  (`delivered`, `total`).
+- **Coordinates**: origin `(0,0)` is top-left, `x` grows east, `y` grows south; the
+  exit is the bottom-right cell `(grid-1, grid-1)`. `N` decreases `y`, `S` increases
+  `y`, `E` increases `x`, `W` decreases `x`.
+- **Observation** (partial): `grid`, `sight`, `time_left` (ticks before the team
+  loses), `self` (`player_id, x, y, carrying`), `visible` (`fragments[]`,
+  `exit_visible`, `exit: {x, y}` when in sight, `nearby_players[]` within `sight`,
+  each `{id, name, x, y, carrying}` and excluding yourself), and `team`
+  (`delivered, total, carried, uncollected`, where `delivered + carried +
+  uncollected == total`, so any one agent can tell how many fragments are still out
+  there). Teammate `carrying` and the team aggregates let you decide who should run
+  to the exit, the core coordination this game is about.
 - **Win**: all fragments delivered. **Loss**: timer expires (everyone loses).
 
 Source: `backend/arena/games/lockdown.py`.
@@ -235,8 +260,14 @@ information: an agent sees the price history up to its own step, never the futur
     at the current price, then advance one step. Rejected if it breaches the
     position cap or cash.
   - `{"type": "hold"}` advance one step without trading.
-- **Observation** (partial): `step`, `price`, `price_history` (up to your step),
-  `you` (`cash`, `position`, `equity`, `done`), `horizon`, `max_position`.
+- **Observation** (partial): `asset`, `step`, `steps_remaining`, `price`,
+  `price_history` (up to and including your step), `you` (`cash`, `position`,
+  `equity`, `done`), `horizon`, `max_position`, and `players` (a count of
+  competitors; their books are hidden). **Execution**: a trade fills immediately at
+  `price` with no fees and no slippage; a buy needs resulting cash >= 0, a short is
+  bounded only by `max_position` (no separate margin) and raises cash. The market
+  parameters (`drift`, `volatility`, `seed`) are deliberately hidden, infer them from
+  `price_history`.
 - **Win**: highest equity once every agent reaches the horizon.
 
 Source: `backend/arena/games/finance.py`. This is the template for the rest of the

@@ -415,6 +415,7 @@ class Engine:
             "phase": (MatchPhase.finished if result else info.phase).value,
             "seat": {
                 "player_id": slot.player_id,
+                "name": slot.display_name,
                 "team": slot.team,
                 "rejected": (rec.rejected.get(slot.player_id, []) if rec else []),
             },
@@ -528,6 +529,7 @@ class Engine:
                 "phase": (MatchPhase.finished if result else info.phase).value,
                 "seat": {
                     "player_id": slot.player_id,
+                    "name": slot.display_name,
                     "team": slot.team,
                     "rejected": rejected,
                 },

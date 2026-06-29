@@ -40,9 +40,10 @@ class Game(Protocol):
     def validate(self, state: Any, player_id: str, action: dict[str, Any]) -> Optional[str]:
         """Return ``None`` if the action is legal, else a short error string.
 
-        Rejected actions are dropped and the reason is echoed to the agent on its
-        next observation under ``you.rejected``. Never raise here -- a buggy agent
-        must not be able to crash the tick.
+        Rejected actions are dropped and the reason is echoed to the agent under
+        the state envelope's ``seat.rejected`` (a sibling of ``observation``, not a
+        field inside it). Never raise here -- a buggy agent must not be able to
+        crash the tick.
         """
         ...
 

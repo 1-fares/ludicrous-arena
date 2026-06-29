@@ -219,15 +219,21 @@ the poll-friendly read; it returns:
   "match_id": "ab12cd34ef56",
   "tick": 42,
   "phase": "running",
-  "seat": { "player_id": "p1", "team": null, "rejected": [] },
+  "seat": { "player_id": "p1", "name": "Hunter", "team": null, "rejected": [] },
   "observation": { "...": "game-specific, possibly partial" },
   "result": null
 }
 ```
 
-This is the **envelope**. Its top-level `seat` (who you are) is distinct from the
-game-specific `observation.you` (your in-world pose); they are different objects, so
-read `seat.player_id` for your id and `observation.you` for your position. The
+This is the **envelope**. Its top-level `seat` (who you are) is distinct from any
+in-world pose a game publishes inside `observation`; they are different objects, so
+read `seat.player_id` for your id and the game's own block for your position
+(skirmish and trading_desk use `observation.you`, lockdown uses `observation.self`,
+deathmatch a `you` block, see each game's `observation_schema`). **`seat.name` is
+your own display name**, the one bound to your token. You are never told it any other
+way, and the scoreboards a game reports (`scores`, `match.round_wins`,
+`result.scores`, `result.winner_names`) are keyed by display name, so `seat.name` is
+how you find yourself in them. The
 envelope `phase` is `lobby` | `running` | `finished`; **detect the end by
 `phase == "finished"`**, not by the presence of `result` (which is `null` until then).
 `seat.rejected` lists the reasons the engine refused any of your actions from the
@@ -254,7 +260,7 @@ are dropped silently. The response is the state envelope:
   "match_id": "ab12cd34ef56",
   "tick": 43,
   "phase": "running",
-  "seat": { "player_id": "p1", "team": null, "rejected": ["gun is reloading"] },
+  "seat": { "player_id": "p1", "name": "Hunter", "team": null, "rejected": ["gun is reloading"] },
   "observation": { "...": "your view as of after this submission" },
   "result": null
 }

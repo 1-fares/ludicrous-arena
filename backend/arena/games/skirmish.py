@@ -181,6 +181,7 @@ META = GameMeta(
                 "type": "object",
                 "description": "Your own pose and status.",
                 "properties": {
+                    "name": {"type": "string", "description": "Your own display name. The scoreboards (scores, match.round_wins) are keyed by name, so this is how you find yourself in them. Same value as the envelope seat.name."},
                     "x": {"type": "integer", "description": "Grid column."},
                     "y": {"type": "integer", "description": "Grid row."},
                     "facing": {"enum": ["N", "E", "S", "W"]},
@@ -279,6 +280,17 @@ META = GameMeta(
                     "safe_ring": {"type": "integer", "description": "Outermost ring not yet fully fallen: the current edge of solid ground. Rings with a lower index than this are gone."},
                     "next_fall_tick": {"type": ["integer", "null"], "description": "Absolute tick the next ring fully falls, or null if only the kept core remains (or collapse is disabled)."},
                     "center": {"type": "array", "items": {"type": "integer"}, "description": "[cx, cy] arena centre cell, the safest point."},
+                },
+            },
+            "rules": {
+                "type": "object",
+                "description": "The combat constants for this match, echoed from the resolved config so the observation is self-contained (also readable in full from GET /v1/matches/{id}).",
+                "properties": {
+                    "fire_range": {"type": "integer", "description": "Cells a shot travels. An enemy at right == 0 within this distance is a clean shot."},
+                    "sight": {"type": "integer", "description": "Max forward distance of the vision cone."},
+                    "fire_cooldown": {"type": "integer", "description": "Ticks between shots once you fire."},
+                    "move_cooldown": {"type": "integer", "description": "Ticks between steps once you move."},
+                    "hearts": {"type": "integer", "description": "Hits to eliminate a fighter (full health)."},
                 },
             },
             "round": {"type": "integer"},
@@ -972,7 +984,8 @@ class Skirmish:
             # The move and fire cooldowns are independent: you can fire while the move
             # cooldown is active (shoot-and-scoot) and vice versa, so can_fire tracks
             # only the gun's own cooldown.
-            "you": {"x": f.x, "y": f.y, "facing": DIR_NAMES[f.facing], "hearts": f.hearts,
+            "you": {"name": f.name,
+                    "x": f.x, "y": f.y, "facing": DIR_NAMES[f.facing], "hearts": f.hearts,
                     "alive": f.alive, "can_move": f.move_cd == 0, "can_fire": f.fire_cd == 0,
                     "score": round(_points(f, cfg), 2), "frags": f.frags,
                     "territory": round(f.terr, 2), "exposed": f.exposed,
@@ -986,6 +999,13 @@ class Skirmish:
                     "round_wins": f.round_wins},
             "view": view,
             "arena": arena,
+            # The combat constants the agent needs to act, echoed from the resolved
+            # config so the per-tick observation is self-contained (the full config
+            # is also readable from GET /v1/matches/{id}). fire_range bounds a clean
+            # shot (enemy at right == 0 within fire_range); sight bounds the cone.
+            "rules": {"fire_range": cfg["fire_range"], "sight": cfg["sight"],
+                      "fire_cooldown": cfg["fire_cooldown"], "move_cooldown": cfg["move_cooldown"],
+                      "hearts": cfg["hearts"]},
             "round": state.round,
             "phase": state.phase,
             "match": {"round": state.round, "rounds_to_win": cfg["rounds_to_win"],

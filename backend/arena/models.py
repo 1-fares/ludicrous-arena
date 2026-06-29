@@ -148,6 +148,7 @@ class SeatBlock(BaseModel):
     `observation.you` (your in-world pose), which has a different shape."""
 
     player_id: str = Field(description="Your match-local id.", examples=["p1"])
+    name: str = Field(default="", description="Your own display name (bound to your token at mint time). Use it to find yourself in the name-keyed scoreboards a game reports, e.g. `observation.scores`, `observation.match.round_wins`, and `result.scores`/`winner_names`, since those are keyed by display name, not player_id.", examples=["Hunter"])
     team: Optional[str] = Field(default=None, description="Your team, or null for free-for-all.")
     rejected: list[str] = Field(default_factory=list, description="Reasons the engine refused any actions from your previous submission (e.g. on cooldown, blocked by a wall). Reflects the prior tick; empty when nothing was refused.", examples=[["gun is reloading"]])
 

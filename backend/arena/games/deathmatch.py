@@ -36,6 +36,13 @@ def _num(v: Any) -> bool:
     so both are rejected at validation, never reaching apply/tick."""
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
+
+# Combat constants. Named (rather than inline magic numbers) so tick and the
+# observation agree on them and an agent can read them instead of guessing.
+HIT_RADIUS = 0.6   # a projectile within this distance of a player is a hit
+HIT_DAMAGE = 34    # hp removed per hit (3 hits kill from MAX_HP)
+MAX_HP = 100       # starting/respawn health
+
 META = GameMeta(
     id="deathmatch",
     title="Deathmatch",
@@ -68,16 +75,39 @@ META = GameMeta(
     },
     observation_schema={
         "type": "object",
-        "description": "Full arena (no fog of war): same as the spectator render.",
+        "description": "Full arena (no fog of war): the spectator render plus the fields a player needs to act (your own `you` block, projectile velocity, the win thresholds in `rules`, and the current `tick`). Headings and angles are radians; heading = atan2(dy, dx), so a `fire.angle` aimed at a target at (tx,ty) from (x,y) is atan2(ty-y, tx-x). Coordinates are in [0, arena_size].",
         "properties": {
-            "arena_size": {"type": "number"},
+            "arena_size": {"type": "number", "description": "Side length; the playfield is the square [0, arena_size] on both axes."},
+            "tick": {"type": "integer", "description": "Current simulation tick (also on the envelope)."},
             "players": {"type": "array", "items": {"type": "object", "properties": {
                 "id": {"type": "string"}, "name": {"type": "string"},
-                "x": {"type": "number"}, "y": {"type": "number"}, "heading": {"type": "number"},
+                "x": {"type": "number"}, "y": {"type": "number"}, "heading": {"type": "number", "description": "Facing in radians (atan2(dy, dx))."},
                 "hp": {"type": "integer"}, "score": {"type": "integer"}, "alive": {"type": "boolean"}}}},
-            "projectiles": {"type": "array", "items": {"type": "object", "properties": {
-                "x": {"type": "number"}, "y": {"type": "number"}}}},
-            "scores": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "projectiles": {"type": "array", "description": "In-flight shots. Velocity is units/second; predict position as (x + vx*dt, y + vy*dt).", "items": {"type": "object", "properties": {
+                "x": {"type": "number"}, "y": {"type": "number"},
+                "vx": {"type": "number"}, "vy": {"type": "number"},
+                "owner": {"type": "string", "description": "player_id that fired it."}}}},
+            "you": {"type": "object", "description": "Your own entity, broken out so you need not scan players[]. Carries the cooldown/respawn timers a spectator does not see.",
+                    "properties": {
+                        "player_id": {"type": "string"},
+                        "x": {"type": "number"}, "y": {"type": "number"},
+                        "heading": {"type": "number"}, "hp": {"type": "integer"},
+                        "score": {"type": "integer"}, "alive": {"type": "boolean"},
+                        "can_fire": {"type": "boolean", "description": "True when you are alive and off cooldown (a fire now is accepted)."},
+                        "cooldown": {"type": "integer", "description": "Ticks until your gun is ready (0 = ready)."},
+                        "respawn_in": {"type": "integer", "description": "Ticks until you respawn (0 = alive)."}}},
+            "rules": {"type": "object", "description": "Match constants, echoed from the resolved config plus the fixed combat geometry, so the observation is self-describing.",
+                      "properties": {
+                          "score_limit": {"type": "integer", "description": "Kills to win the match."},
+                          "time_limit_ticks": {"type": "integer", "description": "Hard tick cap; on timeout the highest score wins (ties shared)."},
+                          "move_speed": {"type": "number", "description": "Units/second when moving."},
+                          "projectile_speed": {"type": "number", "description": "Units/second a shot travels."},
+                          "fire_cooldown": {"type": "integer", "description": "Ticks between shots."},
+                          "respawn_delay": {"type": "integer", "description": "Ticks dead before respawn."},
+                          "hit_radius": {"type": "number", "description": "A shot within this distance of a player hits."},
+                          "hit_damage": {"type": "integer", "description": "hp removed per hit."},
+                          "max_hp": {"type": "integer", "description": "Full health (so ceil(max_hp/hit_damage) hits kill)."}}},
+            "scores": {"type": "object", "description": "Score per player_id.", "additionalProperties": {"type": "integer"}},
         },
     },
 )
@@ -181,7 +211,7 @@ class Deathmatch:
             if e.dead_for > 0:
                 e.dead_for -= 1
                 if e.dead_for == 0:
-                    e.hp = 100
+                    e.hp = MAX_HP
                 continue
             if e.cooldown > 0:
                 e.cooldown -= 1
@@ -199,8 +229,8 @@ class Deathmatch:
             for e in state.entities.values():
                 if e.player_id == pr.owner or e.dead_for > 0:
                     continue
-                if math.hypot(e.x - pr.x, e.y - pr.y) <= 0.6:  # player radius
-                    e.hp -= 34
+                if math.hypot(e.x - pr.x, e.y - pr.y) <= HIT_RADIUS:
+                    e.hp -= HIT_DAMAGE
                     hit = True
                     if e.hp <= 0:
                         e.dead_for = state.cfg["respawn_delay"]
@@ -226,8 +256,35 @@ class Deathmatch:
         }
 
     def observe(self, state: State, player_id: str) -> dict[str, Any]:
-        # No fog of war in deathmatch: agents see the whole arena, same as viewers.
-        return self.render(state)
+        # No fog of war: agents see the whole arena (the spectator render), plus a
+        # few fields a player needs but a spectator does not: a `you` block with
+        # your own cooldown/respawn timer, projectile velocity (position alone is
+        # undodgeable), the win thresholds, and the current tick.
+        cfg = state.cfg
+        view = self.render(state)
+        view["tick"] = state.tick
+        # Projectile velocity + owner, so an agent can predict and dodge a shot and
+        # tell whose it is. (The spectator render keeps just x,y.)
+        view["projectiles"] = [{"x": round(p.x, 3), "y": round(p.y, 3),
+                                "vx": round(p.vx, 3), "vy": round(p.vy, 3), "owner": p.owner}
+                               for p in state.projectiles]
+        me = state.entities.get(player_id)
+        if me is not None:
+            view["you"] = {
+                "player_id": me.player_id, "x": round(me.x, 3), "y": round(me.y, 3),
+                "heading": round(me.heading, 3), "hp": me.hp, "score": me.score,
+                "alive": me.dead_for == 0,
+                "can_fire": me.dead_for == 0 and me.cooldown == 0,
+                "cooldown": me.cooldown,        # ticks until your gun is ready (0 = ready)
+                "respawn_in": me.dead_for,       # ticks until you respawn (0 = alive)
+            }
+        view["rules"] = {
+            "score_limit": cfg["score_limit"], "time_limit_ticks": cfg["time_limit_ticks"],
+            "move_speed": cfg["move_speed"], "projectile_speed": cfg["projectile_speed"],
+            "fire_cooldown": cfg["fire_cooldown"], "respawn_delay": cfg["respawn_delay"],
+            "hit_radius": HIT_RADIUS, "hit_damage": HIT_DAMAGE, "max_hp": MAX_HP,
+        }
+        return view
 
     def encode_state(self, state: State) -> dict[str, Any]:
         # Flat dataclasses: asdict recurses through the entities dict and the

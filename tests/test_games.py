@@ -137,6 +137,92 @@ def test_trading_desk_trade_pnl_and_finish():
     assert res.scores["p1"] == 1000.0      # no price movement -> no P&L
 
 
+def _props(schema):
+    return schema.get("properties", {})
+
+
+def test_skirmish_observation_self_name_and_rules():
+    # The agent must be able to find itself in the name-keyed scoreboards and read the
+    # combat constants its own schema references (fire_range), without a second call.
+    g = registry.get("skirmish")
+    st = g.init_state({"grid": 11, "seed": 3}, _slots(2))
+    obs = g.observe(st, "p1")
+    assert obs["you"]["name"] == "U0"                  # own display name is exposed
+    assert obs["you"]["name"] in obs["scores"]         # so it indexes the scoreboard
+    assert obs["rules"]["fire_range"] == st.cfg["fire_range"]
+    assert obs["rules"]["sight"] == st.cfg["sight"]
+    # Anything observe() emits must be declared in the published schema.
+    you_props = _props(_props(g.meta.observation_schema)["you"])
+    assert "name" in you_props
+    assert "rules" in _props(g.meta.observation_schema)
+
+
+def test_deathmatch_observation_you_and_projectile_velocity():
+    g = registry.get("deathmatch")
+    st = g.init_state({"arena_size": 20}, _slots(2))
+    st.entities["p1"].x = st.entities["p1"].y = 5.0
+    g.apply(st, "p1", {"type": "fire", "angle": 0.0})   # spawn a projectile
+    obs = g.observe(st, "p1")
+    # A `you` block with the cooldown/respawn timers a spectator never sees.
+    assert obs["you"]["player_id"] == "p1"
+    assert obs["you"]["cooldown"] > 0 and obs["you"]["can_fire"] is False
+    assert "respawn_in" in obs["you"]
+    # Projectiles carry velocity + owner so a shot is dodgeable and attributable.
+    pr = obs["projectiles"][0]
+    assert {"x", "y", "vx", "vy", "owner"} <= pr.keys() and pr["owner"] == "p1"
+    # Win thresholds and combat geometry are self-described.
+    assert obs["rules"]["score_limit"] == st.cfg["score_limit"]
+    assert obs["rules"]["hit_damage"] == 34 and obs["rules"]["max_hp"] == 100
+    # The spectator render stays lean (no you/rules, projectiles are just x,y).
+    scene = g.render(st)
+    assert "you" not in scene and set(scene["projectiles"][0]) == {"x", "y"}
+    # Schema declares the new blocks.
+    props = _props(g.meta.observation_schema)
+    assert {"you", "rules"} <= props.keys()
+    assert "vx" in _props(props["projectiles"]["items"])
+
+
+def test_lockdown_observation_excludes_self_and_adds_team_aggregates():
+    g = registry.get("lockdown")
+    st = g.init_state({"grid": 6, "fragments": 3, "sight": 2, "seed": 1}, _slots(2))
+    # Put both pawns on the same cell: the old bug listed yourself in nearby_players.
+    st.pawns["p2"].x, st.pawns["p2"].y = st.pawns["p1"].x, st.pawns["p1"].y
+    obs = g.observe(st, "p1")
+    ids = {n["id"] for n in obs["visible"]["nearby_players"]}
+    assert "p1" not in ids and "p2" in ids                 # self excluded, teammate kept
+    assert "carrying" in obs["visible"]["nearby_players"][0]
+    assert obs["self"]["player_id"] == "p1"
+    assert obs["team"]["uncollected"] == len(st.fragments)
+    # delivered + carried + uncollected == total (the published invariant).
+    t = obs["team"]
+    assert t["delivered"] + t["carried"] + t["uncollected"] == t["total"]
+    assert "time_left" in obs
+
+
+def test_lockdown_exit_cell_revealed_when_visible():
+    g = registry.get("lockdown")
+    st = g.init_state({"grid": 5, "fragments": 1, "sight": 1, "seed": 1}, _slots(1))
+    p = st.pawns["p1"]
+    p.x, p.y = st.exit                                     # stand next to/on the exit
+    obs = g.observe(st, "p1")
+    assert obs["visible"]["exit_visible"] is True
+    assert obs["visible"]["exit"] == {"x": st.exit[0], "y": st.exit[1]}
+
+
+def test_trading_desk_steps_remaining_and_config_bounds():
+    from arena.config import validate_config
+    g = registry.get("trading_desk")
+    st = g.init_state({"seed": 1, "horizon": 5}, _slots(1))
+    obs = g.observe(st, "p1")
+    assert obs["steps_remaining"] == 5                     # horizon - step at step 0
+    g.apply(st, "p1", {"type": "hold"}); g.tick(st, 1.0)
+    assert g.observe(st, "p1")["steps_remaining"] == 4
+    # Out-of-range horizon (the state-size DoS) is now rejected at config validation.
+    import pytest
+    with pytest.raises(ValueError):
+        validate_config(g.meta, {"horizon": 10_000_000})
+
+
 def test_trading_desk_validation():
     g = registry.get("trading_desk")
     st = g.init_state({"horizon": 5, "start_cash": 100, "start_price": 100,

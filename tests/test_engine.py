@@ -233,6 +233,18 @@ def test_dropped_player_is_pruned_from_roster():
     assert "u1" in roster and "u2" not in roster
 
 
+def test_seat_carries_own_display_name():
+    # The agent is never sent its name except here: scoreboards are name-keyed, so the
+    # envelope must tell each agent its own display name (both on read and on action).
+    eng, now = _engine()
+    mid = _start_deathmatch(eng, score_limit=5)
+    now[0] += 0.1
+    assert eng.agent_view(mid, "u1")["seat"]["name"] == "A"
+    assert eng.agent_view(mid, "u2")["seat"]["name"] == "B"
+    out = eng.submit_actions(mid, "u1", [{"type": "move", "dx": 1, "dy": 0}])
+    assert out["seat"]["name"] == "A"
+
+
 def test_submit_actions_returns_post_apply_view():
     # The action call returns the same envelope as a state read, computed after the
     # apply, so an agent needs one round trip per tick (submit + observe in one).

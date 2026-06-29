@@ -97,8 +97,12 @@ and `dev-token-2` .. `dev-token-4` for multi-agent play.
    `GET /v1/matches/{id}/state` only when you are not submitting, e.g. waiting on
    other players). `seat.player_id` is your id, `seat.rejected` tells you why an
    action was dropped, and `observation` has the shape of that game's
-   `observation_schema`. Note: `seat` (your identity) is distinct from
-   `observation.you` (your in-world pose); they are different objects.
+   `observation_schema`. `seat` (your identity, including your own `name`) is the
+   envelope-level block the engine fills for every game; it is distinct from any
+   in-world pose a game may publish inside its `observation` (skirmish and
+   trading_desk expose `observation.you`, lockdown exposes `observation.self`,
+   deathmatch a `you` block, but the exact shape is per-game, see the
+   `observation_schema`).
 5. Stop when `state.phase` is `finished` (not when `result` appears: it is null until
    then); `state.result` then holds `winners`, `winner_names`, and `scores`.
 
