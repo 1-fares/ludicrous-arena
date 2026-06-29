@@ -43,8 +43,61 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById("scene").appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0e16);
-scene.fog = new THREE.Fog(0x0a0e16, 40, 130);
+scene.background = new THREE.Color(0x060810);
+// Fog fades the far edges of the board into the backdrop. Tuned to the sky's mid
+// tone so the board dissolves into the chamber rather than into a flat grey.
+scene.fog = new THREE.Fog(0x070a14, 45, 150);
+
+// Backdrop: the arena is a lit platform suspended in a vast dark chamber over a
+// glowing abyss, not a board in empty black. A gradient sky dome (deep indigo up
+// top, warm ember low, where the floor falls away) plus a faint starfield give the
+// void depth. Both opt out of fog so the backdrop stays clean behind the board.
+function buildBackdrop() {
+  const sky = new THREE.Mesh(
+    new THREE.SphereGeometry(320, 32, 16),
+    new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: {
+        cTop: { value: new THREE.Color(0x0a1230) },
+        cMid: { value: new THREE.Color(0x05070f) },
+        cBot: { value: new THREE.Color(0x241108) },
+      },
+      vertexShader: "varying vec3 vp; void main(){ vp = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
+      fragmentShader: [
+        "varying vec3 vp; uniform vec3 cTop; uniform vec3 cMid; uniform vec3 cBot;",
+        "void main(){",
+        "  float h = normalize(vp).y;",
+        "  vec3 c = h > 0.0 ? mix(cMid, cTop, pow(h, 0.6)) : mix(cMid, cBot, pow(-h, 0.7));",
+        "  gl_FragColor = vec4(c, 1.0);",
+        "}",
+      ].join("\n"),
+    }),
+  );
+  sky.frustumCulled = false;
+  scene.add(sky);
+
+  // Starfield: dim points on a high shell, biased to the upper hemisphere. A small,
+  // self-contained PRNG keeps the layout stable across reloads (no Math.random spread).
+  const N = 720, pos = new Float32Array(N * 3);
+  let s = 0x9e3779b1 >>> 0;
+  const rnd = () => { s = (Math.imul(s, 1103515245) + 12345) >>> 0; return s / 0xffffffff; };
+  for (let i = 0; i < N; i++) {
+    const u = rnd(), th = rnd() * Math.PI * 2, r = 190 + rnd() * 110;
+    const el = 0.04 + u * 0.95;                 // mostly above the horizon
+    const sq = Math.sqrt(Math.max(0, 1 - el * el));
+    pos[i * 3] = r * sq * Math.cos(th);
+    pos[i * 3 + 1] = el * r * 0.9 + 12;
+    pos[i * 3 + 2] = r * sq * Math.sin(th);
+  }
+  const stars = new THREE.Points(
+    new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(pos, 3)),
+    new THREE.PointsMaterial({ color: 0xb8c6e8, size: 1.0, sizeAttenuation: true,
+      transparent: true, opacity: 0.8, depthWrite: false, fog: false }),
+  );
+  stars.frustumCulled = false;
+  scene.add(stars);
+}
+buildBackdrop();
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500);
 camera.position.set(10, 14, 18);
@@ -240,6 +293,34 @@ function crackCanvasTexture(stage, stages) {
   return tex;
 }
 
+// The molten abyss seen through holes once the floor falls away: a radial glow,
+// hot near the centre, fading to near-black at the rim, so a collapsing arena
+// reveals a glowing pit rather than a flat dark plane. One shared texture.
+function emberPitTexture() {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 256;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#05060a";
+  ctx.fillRect(0, 0, 256, 256);
+  const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 150);
+  grad.addColorStop(0.0, "#ff8a2e");
+  grad.addColorStop(0.25, "#c2461a");
+  grad.addColorStop(0.55, "#3a160e");
+  grad.addColorStop(1.0, "#05060a");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 256, 256);
+  const rnd = mulberry32(0x51ed7e);
+  for (let i = 0; i < 120; i++) {              // flecks of brighter lava near the core
+    const a = rnd() * Math.PI * 2, rr = rnd() * rnd() * 110;
+    ctx.fillStyle = `rgba(255,${150 + Math.floor(rnd() * 80)},60,${(0.15 + rnd() * 0.5).toFixed(2)})`;
+    const s = 1 + rnd() * 3;
+    ctx.fillRect(128 + Math.cos(a) * rr, 128 + Math.sin(a) * rr, s, s);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 // ---- sound effects (WebAudio, synthesized, no asset files) ----------------
 // Short blips cued off the polled scene: shoot, hit, crack, drop (a tile or fighter
 // falling), and death. The AudioContext can only start after a user gesture (browser
@@ -328,6 +409,7 @@ function makeSkirmishRenderer() {
   const walls = new Map();      // "x,y" -> { mesh, x, y, state, decay, fallsIn, stage, sink, vy, crackMat }
   const crackTex = new Map();   // stage -> CanvasTexture, shared by every cracking tile/wall
   let tileGeo = null, solidMat = null, wallGeo = null, wallSolidMat = null, curStages = 1;
+  let emberTex = null, emberGeo = null, emberPoints = null, embers = [];   // molten-pit motes
   const TILE_H = 0.3, VOID_DEPTH = 7, WALL_H = 1.25, WALL_REST_Y = WALL_H / 2;
 
   function getCrackTex(stage, stages) {
@@ -363,12 +445,33 @@ function makeSkirmishRenderer() {
     tiles.clear();
     walls.clear();
     floor = new THREE.Group();
-    // Abyss seen through holes once the floor falls away: a dark unlit plane far below.
-    const abyss = new THREE.Mesh(new THREE.PlaneGeometry(g * 3, g * 3),
-      new THREE.MeshBasicMaterial({ color: 0x05070c }));
+    // Abyss seen through holes once the floor falls away: a glowing molten pit far
+    // below, centred under the board, so a collapsing arena reveals heat and depth
+    // instead of a flat dark plane. The texture is dark at the rim, so it fades into
+    // the surrounding void without a hard edge.
+    if (emberTex) emberTex.dispose();
+    emberTex = emberPitTexture();
+    const abyss = new THREE.Mesh(new THREE.PlaneGeometry(g * 2.2, g * 2.2),
+      new THREE.MeshBasicMaterial({ map: emberTex, transparent: true, depthWrite: false }));
     abyss.rotation.x = -Math.PI / 2;
     abyss.position.set(g / 2 - 0.5, -VOID_DEPTH, g / 2 - 0.5);
     floor.add(abyss);
+    // Embers drifting up out of the pit: a few dozen additive points that rise and
+    // recycle, so the abyss reads as a live furnace under the arena. Animated in lerp().
+    const EN = 60, ep = new Float32Array(EN * 3);
+    embers = [];
+    for (let i = 0; i < EN; i++) {
+      const ex = (g / 2 - 0.5) + (Math.random() - 0.5) * g * 1.4;
+      const ez = (g / 2 - 0.5) + (Math.random() - 0.5) * g * 1.4;
+      const ey = -VOID_DEPTH + Math.random() * VOID_DEPTH;
+      ep[i * 3] = ex; ep[i * 3 + 1] = ey; ep[i * 3 + 2] = ez;
+      embers.push({ x: ex, z: ez, vy: 0.4 + Math.random() * 0.9 });
+    }
+    emberGeo = new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(ep, 3));
+    emberPoints = new THREE.Points(emberGeo, new THREE.PointsMaterial({
+      color: 0xff8c3a, size: 0.16, sizeAttenuation: true, transparent: true,
+      opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    floor.add(emberPoints);
     // One thin tile per cell, top flush with y=0. The 0.96 width leaves a dark gap that
     // reads as the old grid, and the box thickness gives holes a visible lip when a
     // neighbour falls away. Geometry and the solid material are shared across tiles.
@@ -470,24 +573,59 @@ function makeSkirmishRenderer() {
   }
 
   function makeFighter(color) {
+    // A compact armoured combatant rather than a game-piece pawn: a lacquered
+    // team-coloured shell with gunmetal joints, a glowing visor and chest core in the
+    // team colour (so identity reads at a glance and the "front" is unmistakable), a
+    // rifle with a hot muzzle tip, and a back thruster pack. Model forward is +X;
+    // rotation.y aims it along facing, so the visor and muzzle always point where the
+    // fighter looks. Up is +Y; the group sits with feet at y=0.
     const grp = new THREE.Group();
-    // Coloured but not glowing: a faint emissive floor keeps the shadowed side legible
-    // without the bloom-catching glow that made the fighters hard to look at.
-    const mat = new THREE.MeshStandardMaterial({
-      color, roughness: 0.6, metalness: 0.05, envMapIntensity: 0.25,
-      emissive: color, emissiveIntensity: 0.12 });
-    const legs = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.42, 0.26), mat);
-    legs.position.y = 0.21; legs.castShadow = true; grp.add(legs);
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.34, 4, 8), mat);
-    torso.position.y = 0.66; torso.castShadow = true; grp.add(torso);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 16, 16),
-      new THREE.MeshStandardMaterial({ color: 0xf0e6d2, roughness: 0.6 }));
-    head.position.y = 1.02; head.castShadow = true; grp.add(head);
-    // Gun points +X (the model's forward); rotation.y aims it along facing.
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.09, 0.12),
-      new THREE.MeshStandardMaterial({ color: 0x20242c, roughness: 0.4, metalness: 0.5 }));
-    gun.position.set(0.34, 0.66, 0.12); gun.castShadow = true; grp.add(gun);
-    grp.userData.bodyMat = mat;   // referenced to pulse red on a hit
+    // bodyMat is the team shell. It is referenced as userData.bodyMat and its emissive
+    // is driven red on a hit (see lerp), so it starts non-emissive.
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color, roughness: 0.42, metalness: 0.55, envMapIntensity: 0.6, emissive: 0x000000 });
+    const darkMat = new THREE.MeshStandardMaterial({
+      color: 0x2a2f3a, roughness: 0.5, metalness: 0.65, envMapIntensity: 0.5 });
+    const glowMat = new THREE.MeshBasicMaterial({ color });        // team accents that catch bloom
+
+    const legGeo = new THREE.CylinderGeometry(0.085, 0.055, 0.36, 8);
+    for (const sx of [-0.12, 0.12]) {
+      const leg = new THREE.Mesh(legGeo, darkMat);
+      leg.position.set(sx, 0.18, 0); leg.castShadow = true; grp.add(leg);
+    }
+    const hips = new THREE.Mesh(new RoundedBoxGeometry(0.44, 0.22, 0.3, 2, 0.05), bodyMat);
+    hips.position.y = 0.42; hips.castShadow = true; grp.add(hips);
+    const torso = new THREE.Mesh(new RoundedBoxGeometry(0.48, 0.52, 0.34, 3, 0.09), bodyMat);
+    torso.position.y = 0.74; torso.castShadow = true; grp.add(torso);
+    // Glowing chest core, team-coloured, set into the front of the torso.
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.075, 12, 12), glowMat);
+    core.position.set(0, 0.78, 0.18); grp.add(core);
+    // Shoulder pauldrons.
+    const shGeo = new RoundedBoxGeometry(0.17, 0.18, 0.24, 2, 0.05);
+    for (const sx of [-0.31, 0.31]) {
+      const sh = new THREE.Mesh(shGeo, darkMat);
+      sh.position.set(sx, 0.95, 0); sh.castShadow = true; grp.add(sh);
+    }
+    // Head + a glowing visor across its front face (the clearest facing cue).
+    const head = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.24, 0.28, 3, 0.07), darkMat);
+    head.position.y = 1.13; head.castShadow = true; grp.add(head);
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.08, 0.22), glowMat);
+    visor.position.set(0.13, 1.14, 0); grp.add(visor);
+    // Back thruster pack with a faint glow vent.
+    const pack = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.32, 0.16, 2, 0.04), darkMat);
+    pack.position.set(-0.22, 0.78, 0); pack.castShadow = true; grp.add(pack);
+    const vent = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.12, 0.1), glowMat);
+    vent.position.set(-0.33, 0.7, 0); grp.add(vent);
+    // Rifle along +X with a hot muzzle tip; the tip sits at the gun's front so a shot
+    // visibly leaves the barrel (the muzzle flash is placed there too, see update()).
+    const gun = new THREE.Mesh(new RoundedBoxGeometry(0.5, 0.12, 0.14, 2, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x14171d, roughness: 0.35, metalness: 0.75 }));
+    gun.position.set(0.42, 0.74, 0.14); gun.castShadow = true; grp.add(gun);
+    const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffd27a }));
+    muzzle.position.set(0.69, 0.74, 0.14); grp.add(muzzle);
+
+    grp.userData.bodyMat = bodyMat;   // referenced to pulse red on a hit
     // Beacon: a marker that hovers over an "exposed" fighter (idle too long, now
     // visible to every enemy). Hidden until the scene flags the fighter exposed.
     const beacon = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.4, 4),
@@ -522,6 +660,8 @@ function makeSkirmishRenderer() {
       fighters.clear(); shots.clear(); fx.length = 0; prevBullets = []; tAcc = 0;
       prevCracking = new Set(); prevVoid = new Set();
       disposeFloorExtras(); tiles.clear(); walls.clear();
+      if (emberTex) { emberTex.dispose(); emberTex = null; }
+      emberGeo = null; emberPoints = null; embers = [];
       floor = null; wallGroup = null; builtGrid = -1;
       tileGeo = null; solidMat = null; wallGeo = null; wallSolidMat = null; curStages = 1;
     },
@@ -596,17 +736,22 @@ function makeSkirmishRenderer() {
       // Bullets: pooled spheres, lerped so they streak rather than jump.
       const n = d.bullets.length;
       d.bullets.forEach((b, i) => {
+        // The sim spawns a shot at the shooter's cell centre, but the gun barrel is
+        // ~0.66 ahead of that. Lead the rendered shot forward along its travel
+        // direction (dx,dy) and raise it to gun height so it visibly leaves the muzzle
+        // instead of appearing to start behind the fighter.
+        const lx = b.x + (b.dx || 0) * 0.45, lz = b.y + (b.dy || 0) * 0.45;
         let rec = shots.get(i);
         if (!rec) {
-          const m = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 10),
+          const m = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 10),
             new THREE.MeshBasicMaterial({ color: 0xffe9a0 }));
-          m.position.set(b.x, 0.6, b.y);
+          m.position.set(lx, 0.74, lz);
           root.add(m);
-          rec = { mesh: m, target: new THREE.Vector3(b.x, 0.6, b.y) };
+          rec = { mesh: m, target: new THREE.Vector3(lx, 0.74, lz) };
           shots.set(i, rec);
         }
         rec.mesh.visible = true;
-        rec.target.set(b.x, 0.6, b.y);
+        rec.target.set(lx, 0.74, lz);
       });
       for (const [i, rec] of shots) if (i >= n) rec.mesh.visible = false;
 
@@ -615,7 +760,9 @@ function makeSkirmishRenderer() {
       let fired = 0;
       d.bullets.forEach(b => {
         if (!prevBullets.some(pb => Math.hypot(pb.x - b.x, pb.y - b.y) < 1.6)) {
-          spawnRing(b.x, b.y, 0xffcf6a, 0.34, 0.25, 1.25, 0.6); fired++;
+          // Flash at the muzzle (gun tip), forward of the body, not at the cell centre.
+          const mx = b.x + (b.dx || 0) * 0.66, my = b.y + (b.dy || 0) * 0.66;
+          spawnRing(mx, my, 0xffcf6a, 0.34, 0.25, 1.25, 0.74); fired++;
         }
       });
       if (fired) Sound.shoot();
@@ -652,6 +799,19 @@ function makeSkirmishRenderer() {
     lerp(dt) {
       const d = dt || 0.016;
       tAcc += d;
+      // Embers rise out of the molten pit and recycle, with a gentle sway, so the
+      // abyss under the arena reads as a live furnace.
+      if (emberPoints && emberGeo) {
+        const arr = emberGeo.attributes.position.array;
+        for (let i = 0; i < embers.length; i++) {
+          let y = arr[i * 3 + 1] + embers[i].vy * d;
+          if (y > -0.3) y = -VOID_DEPTH;                 // recycle from the pit floor
+          arr[i * 3] = embers[i].x + Math.sin(tAcc * 0.6 + i) * 0.25;
+          arr[i * 3 + 1] = y;
+          arr[i * 3 + 2] = embers[i].z + Math.cos(tAcc * 0.5 + i * 1.3) * 0.25;
+        }
+        emberGeo.attributes.position.needsUpdate = true;
+      }
       // Floor: drop void tiles under gravity, ease crack sink, pulse the danger glow.
       for (const t of tiles.values()) {
         if (t.state === "void") {

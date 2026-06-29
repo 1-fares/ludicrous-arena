@@ -1059,7 +1059,8 @@ class Skirmish:
                  "out": f.out, "fell_tick": f.fell_tick, "round_wins": f.round_wins}
                 for pid, f in state.fighters.items()
             ],
-            "bullets": [{"x": round(b.x, 2), "y": round(b.y, 2)} for b in state.bullets],
+            "bullets": [{"x": round(b.x, 2), "y": round(b.y, 2),
+                         "dx": round(b.dx, 2), "dy": round(b.dy, 2)} for b in state.bullets],
             "floor": {"cracking": floor_cracking, "void": void},
             "walls_cracking": walls_cracking,
             "collapse": {"on": bool(cfg.get("collapse", True)), "stages": cfg["decay_stages"],
