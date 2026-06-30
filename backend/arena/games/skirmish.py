@@ -429,15 +429,31 @@ def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[i
 
 
 def _pick_spawns(pool: list[tuple[int, int]], count: int,
-                 rng: random.Random) -> list[tuple[int, int]]:
+                 rng: random.Random, g: Optional[int] = None) -> list[tuple[int, int]]:
     """Pick ``count`` distinct, spread-out cells from ``pool`` using ``rng``. Greedy
     farthest-point placement with a randomised first pick and a randomised choice among
     the few farthest candidates at each step: spawns stay spread apart but vary run to
     run instead of landing on the same cells every time. Deterministic for a given rng,
-    so the engine's catch-up stays reproducible."""
+    so the engine's catch-up stays reproducible.
+
+    When the grid size ``g`` is known, bias toward the interior: drop the outer rings
+    (those nearest the edge), which the floor collapse eats first. Pure farthest-point
+    placement otherwise piles spawns into the corners/edges, exactly the ground that
+    falls earliest, so a fighter can be trapped against a collapsing corner before it
+    can path inward. Starting fighters off the edge gives them room and time. The filter
+    only applies while it still leaves plenty of candidates to spread ``count`` fighters
+    across; otherwise (small/dense grids) it falls back to the full pool."""
     cells = list(pool)
     if not cells or count <= 0:
         return []
+    if g:
+        def ring(c: tuple[int, int]) -> int:
+            return min(c[0], g - 1 - c[0], c[1], g - 1 - c[1])
+        rmax = max((ring(c) for c in cells), default=0)
+        cutoff = max(2, round(rmax * 0.34))          # drop ~the outer third of rings
+        inner = [c for c in cells if ring(c) >= cutoff]
+        if len(inner) >= max(count * 4, 8):          # keep room to spread; else fall back
+            cells = inner
     chosen = [rng.choice(cells)]
     while len(chosen) < count and len(chosen) < len(cells):
         rest = [c for c in cells if c not in chosen]
@@ -553,7 +569,7 @@ class Skirmish:
         # _new_round, between rounds. No players at create time (pool is built, fighters
         # are added by add_player on join); a full roster arrives via reset_match.
         rng = random.Random(f"{int(cfg['seed'])}:r1")
-        picks = _pick_spawns(pool, len(players), rng)
+        picks = _pick_spawns(pool, len(players), rng, cfg["grid"])
         rng.shuffle(picks)
         fighters: dict[str, Fighter] = {}
         for i, p in enumerate(players):
@@ -587,7 +603,7 @@ class Skirmish:
                     if (x, y) not in walls and (x, y) not in occupied]
             inner = [c for c in free if min(c[0], c[1], g - 1 - c[0], g - 1 - c[1]) >= 1]
             pool = inner or free or [(1, 1)]
-        sx, sy = _pick_spawns(pool, 1, rng)[0]
+        sx, sy = _pick_spawns(pool, 1, rng, state.grid)[0]
         state.fighters[slot.player_id] = Fighter(name=slot.display_name, x=sx, y=sy,
                                                  facing=rng.randrange(4), hearts=state.cfg["hearts"],
                                                  last_act=state.tick)
@@ -834,7 +850,7 @@ class Skirmish:
         # so positions vary round to round but stay reproducible for the engine's catch-up.
         nxt = state.round + 1
         rng = random.Random(f"{int(state.cfg['seed'])}:r{nxt}")
-        picks = _pick_spawns([(x, y) for x, y in state.spawns], len(state.fighters), rng)
+        picks = _pick_spawns([(x, y) for x, y in state.spawns], len(state.fighters), rng, state.grid)
         rng.shuffle(picks)
         for i, (pid, f) in enumerate(state.fighters.items()):
             # Falling is round-scoped: clear out/fell_tick and respawn the fighter, the
