@@ -217,15 +217,15 @@ function makeLabel(text, color) {
   // draw state is set again afterwards.
   ctx.font = font;
   const textW = Math.ceil(ctx.measureText(text).width);
-  const padX = 22, dot = 16, gap = 10;
-  cv.width = Math.max(96, textW + padX * 2 + dot + gap);
+  const padX = 20;
+  cv.width = Math.max(80, textW + padX * 2);
   cv.height = 64;
   ctx.font = font;
   ctx.textBaseline = "middle";
-  // Rounded, semi-transparent chip so the name reads on any background without a
-  // heavy black slab. A team-colour dot anchors identity; the name stays light for
-  // contrast (team colour is already carried by the dot, the fighter, and its ring).
-  const bw = textW + padX * 2 + dot + gap, bh = 44, bx = (cv.width - bw) / 2, by = 10, rad = 12;
+  // Rounded, semi-transparent chip so the name reads on any background without a heavy
+  // black slab. A faint team-colour border carries identity (the fighter's own colour
+  // does the rest); the name stays light for contrast.
+  const bw = textW + padX * 2, bh = 44, bx = (cv.width - bw) / 2, by = 10, rad = 12;
   ctx.beginPath();
   ctx.moveTo(bx + rad, by);
   ctx.arcTo(bx + bw, by, bx + bw, by + bh, rad);
@@ -236,13 +236,9 @@ function makeLabel(text, color) {
   ctx.fillStyle = "rgba(8,11,18,0.78)";
   ctx.fill();
   ctx.strokeStyle = hexA(color, 0.55); ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.fillStyle = hex(color);
-  ctx.beginPath();
-  ctx.arc(bx + padX + dot / 2, by + bh / 2, dot / 2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.textAlign = "left";
+  ctx.textAlign = "center";
   ctx.fillStyle = "#eef3fb";
-  ctx.fillText(text, bx + padX + dot + gap, by + bh / 2 + 1);
+  ctx.fillText(text, cv.width / 2, by + bh / 2 + 1);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   // toneMapped:false keeps the label at its true canvas colours, the ACES tone map + bloom
@@ -303,38 +299,6 @@ function crackCanvasTexture(stage, stages) {
       ctx.lineTo(cx, cy);
     }
     ctx.stroke();
-  }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-// Wall surface: a procedural tech-panel texture so the cover blocks read as armoured
-// plating instead of flat plastic. A lit base with darker recessed seams (a 2x2 panel
-// grid), a brighter bevel along the top edge, and faint speckle. One shared texture for
-// every wall face; cheap (drawn once) and the seams pick up the env reflection.
-function wallPanelTexture() {
-  const cv = document.createElement("canvas");
-  cv.width = cv.height = 128;
-  const ctx = cv.getContext("2d");
-  ctx.fillStyle = "#8a96ad";
-  ctx.fillRect(0, 0, 128, 128);
-  // recessed seams: a cross dividing the face into four panels
-  ctx.strokeStyle = "#5d6781"; ctx.lineWidth = 6;
-  ctx.beginPath(); ctx.moveTo(64, 0); ctx.lineTo(64, 128); ctx.moveTo(0, 64); ctx.lineTo(128, 64); ctx.stroke();
-  ctx.strokeStyle = "#3f475d"; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(64, 0); ctx.lineTo(64, 128); ctx.moveTo(0, 64); ctx.lineTo(128, 64); ctx.stroke();
-  // soft inner bevel highlight on each panel
-  ctx.strokeStyle = "#a9b4ca"; ctx.lineWidth = 2;
-  for (const [ox, oy] of [[0, 0], [64, 0], [0, 64], [64, 64]]) ctx.strokeRect(ox + 8, oy + 8, 48, 48);
-  // top edge catches the key light a touch brighter
-  const grad = ctx.createLinearGradient(0, 0, 0, 32);
-  grad.addColorStop(0, "rgba(190,200,222,0.55)"); grad.addColorStop(1, "rgba(190,200,222,0)");
-  ctx.fillStyle = grad; ctx.fillRect(0, 0, 128, 32);
-  const rnd = mulberry32(0x7a11ce);
-  for (let i = 0; i < 60; i++) {                 // faint speckle to break the flatness
-    ctx.fillStyle = `rgba(40,46,60,${(0.04 + rnd() * 0.08).toFixed(3)})`;
-    ctx.fillRect(rnd() * 128, rnd() * 128, 1 + rnd() * 2, 1 + rnd() * 2);
   }
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -458,7 +422,6 @@ function makeSkirmishRenderer() {
   const crackTex = new Map();   // stage -> CanvasTexture, shared by every cracking tile/wall
   let tileGeo = null, solidMat = null, wallGeo = null, wallSolidMat = null, curStages = 1;
   let emberTex = null, emberGeo = null, emberPoints = null, embers = [];   // molten-pit motes
-  let wallTex = null;                                                       // shared wall plating texture
   const TILE_H = 0.3, VOID_DEPTH = 7, WALL_H = 1.25, WALL_REST_Y = WALL_H / 2;
 
   function getCrackTex(stage, stages) {
@@ -540,10 +503,7 @@ function makeSkirmishRenderer() {
     // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
     wallGeo = new RoundedBoxGeometry(0.98, WALL_H, 0.98, 2, 0.06);
-    if (wallTex) wallTex.dispose();
-    wallTex = wallPanelTexture();
-    wallSolidMat = new THREE.MeshStandardMaterial({ map: wallTex, color: 0xcdd5e4,
-      roughness: 0.7, metalness: 0.15, envMapIntensity: 0.4 });
+    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0x97a3b8, roughness: 0.85, metalness: 0.0, envMapIntensity: 0.25 });
     root.add(wallGroup);
   }
 
@@ -694,20 +654,6 @@ function makeSkirmishRenderer() {
     return grp;
   }
 
-  const FIGHTER_SCALE = 1.2;   // slightly larger than 1 cell so fighters read at a glance
-  const BULLET_GEO = new THREE.BoxGeometry(0.55, 0.07, 0.07);   // elongated tracer (local +X = travel)
-
-  // A team-coloured glow ring on the floor under a fighter: instant identification and
-  // grounding. Lives in `root` (not parented to the tilting body) so it always lies flat.
-  function makeGroundRing(color) {
-    const m = new THREE.Mesh(
-      new THREE.RingGeometry(0.34, 0.5, 28),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5,
-        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
-    m.rotation.x = -Math.PI / 2;
-    m.position.y = 0.03;
-    return m;
-  }
 
   // Transient effect rings (muzzle blast, hit burst), pooled so repeated shots do
   // not allocate. Each grows and fades over `dur` seconds, then is hidden and reused.
@@ -735,7 +681,6 @@ function makeSkirmishRenderer() {
       prevCracking = new Set(); prevVoid = new Set();
       disposeFloorExtras(); tiles.clear(); walls.clear();
       if (emberTex) { emberTex.dispose(); emberTex = null; }
-      if (wallTex) { wallTex.dispose(); wallTex = null; }
       emberGeo = null; emberPoints = null; embers = [];
       floor = null; wallGroup = null; builtGrid = -1;
       tileGeo = null; solidMat = null; wallGeo = null; wallSolidMat = null; curStages = 1;
@@ -759,21 +704,18 @@ function makeSkirmishRenderer() {
         let rec = fighters.get(p.id);
         if (!rec) {
           const group = makeFighter(colorFor(i));
-          group.scale.setScalar(FIGHTER_SCALE);
           group.position.set(p.x, 0, p.y);
           const label = makeLabel(p.name, colorFor(i));
-          label.position.set(p.x, 1.75, p.y);
-          const ring = makeGroundRing(colorFor(i));
-          ring.position.set(p.x, 0.03, p.y);
-          root.add(group); root.add(label); root.add(ring);
+          label.position.set(p.x, 1.7, p.y);
+          root.add(group); root.add(label);
           // A fighter first seen already out fell before we tuned in: place it gone, do
           // not replay the drop (the out -> respawn cycle below animates real transitions).
           const startedOut = !!p.out;
-          rec = { group, label, ring, target: new THREE.Vector3(p.x, 0, p.y),
+          rec = { group, label, target: new THREE.Vector3(p.x, 0, p.y),
                   heading: Math.atan2(-p.dy, p.dx), dead: !p.alive,
                   out: startedOut, falling: false, fallen: startedOut, vy: 0, hp: p.hearts, hitFlash: 0,
                   phase: Math.random() * 6.283, recoil: 0, moveAmt: 0, labelBase: 1 };
-          if (startedOut) { group.visible = false; label.visible = false; ring.visible = false; }
+          if (startedOut) { group.visible = false; label.visible = false; }
           fighters.set(p.id, rec);
         }
         if (p.hearts < rec.hp) {            // lost a heart since the last poll: flash red
@@ -797,46 +739,41 @@ function makeSkirmishRenderer() {
         }
         if (!rec.out && (rec.falling || rec.fallen)) {  // respawned / new round: lift back in
           rec.falling = false; rec.fallen = false; rec.vy = 0;
-          rec.group.visible = true; rec.label.visible = true; rec.ring.visible = true;
-          rec.group.scale.setScalar(FIGHTER_SCALE);
+          rec.group.visible = true; rec.label.visible = true;
+          rec.group.scale.setScalar(1);
           rec.group.rotation.set(0, rec.group.rotation.y, 0);
           rec.group.position.set(p.x, 0, p.y);
         }
-        rec.label.position.set(p.x, 1.75, p.y);
+        rec.label.position.set(p.x, 1.7, p.y);
         // Base label opacity from state; lerp() multiplies it by a distance fade so far
         // labels recede instead of crowding the view.
         rec.labelBase = p.out ? 0 : (p.alive ? 1 : 0.4);
-        rec.ring.visible = p.alive && !p.out;          // a downed/fallen fighter has no ring
         rec.group.userData.beacon.visible = !!p.exposed && p.alive && !p.out;
       });
       for (const [id, rec] of fighters) if (!seen.has(id)) {
         disposeTree(rec.group); root.remove(rec.group);
         disposeTree(rec.label); root.remove(rec.label);  // frees the name-label texture
-        if (rec.ring) { disposeTree(rec.ring); root.remove(rec.ring); }
         fighters.delete(id);
       }
 
-      // Bullets: pooled glowing tracers, elongated and pointed along travel so a shot
-      // reads as a streak leaving the barrel rather than a floating dot.
+      // Bullets: pooled spheres, lerped so they streak rather than jump.
       const n = d.bullets.length;
       d.bullets.forEach((b, i) => {
         // The sim spawns a shot at the shooter's cell centre, but the gun barrel is
         // ~0.66 ahead of that. Lead the rendered shot forward along its travel
         // direction (dx,dy) and raise it to gun height so it visibly leaves the muzzle
         // instead of appearing to start behind the fighter.
-        const dx = b.dx || 0, dy = b.dy || 0;
-        const lx = b.x + dx * 0.45, lz = b.y + dy * 0.45;
+        const lx = b.x + (b.dx || 0) * 0.45, lz = b.y + (b.dy || 0) * 0.45;
         let rec = shots.get(i);
         if (!rec) {
-          const m = new THREE.Mesh(BULLET_GEO, new THREE.MeshBasicMaterial({
-            color: 0xffe6a0, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+          const m = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 10),
+            new THREE.MeshBasicMaterial({ color: 0xffe9a0 }));
           m.position.set(lx, 0.74, lz);
           root.add(m);
           rec = { mesh: m, target: new THREE.Vector3(lx, 0.74, lz) };
           shots.set(i, rec);
         }
         rec.mesh.visible = true;
-        if (dx || dy) rec.mesh.rotation.y = Math.atan2(-dy, dx);   // aim the tracer along travel
         rec.target.set(lx, 0.74, lz);
       });
       for (const [i, rec] of shots) if (i >= n) rec.mesh.visible = false;
@@ -848,7 +785,7 @@ function makeSkirmishRenderer() {
         if (!prevBullets.some(pb => Math.hypot(pb.x - b.x, pb.y - b.y) < 1.6)) {
           // Flash at the muzzle (gun tip), forward of the body, not at the cell centre.
           const mx = b.x + (b.dx || 0) * 0.66, my = b.y + (b.dy || 0) * 0.66;
-          spawnRing(mx, my, 0xffe08a, 0.3, 0.2, 1.6, 0.74); fired++;
+          spawnRing(mx, my, 0xffcf6a, 0.34, 0.25, 1.25, 0.74); fired++;
           // Kick the shooter's gun back: the fighter on/nearest the shot's cell.
           let best = null, bd = 1e9;
           for (const rec of fighters.values()) {
@@ -955,7 +892,6 @@ function makeSkirmishRenderer() {
       }
       for (const rec of fighters.values()) {
         if (rec.falling) {                         // eliminated: fall through the hole, tumbling
-          if (rec.ring) rec.ring.visible = false;
           rec.vy += d * 11;
           rec.group.position.y -= rec.vy * d;
           rec.group.rotation.x += d * 7;
@@ -1002,11 +938,6 @@ function makeSkirmishRenderer() {
         if (bm) {
           if (rec.hitFlash > 0) rec.hitFlash = Math.max(0, rec.hitFlash - d / 0.4);
           bm.emissive.setRGB(rec.hitFlash * 0.95, 0, 0);
-        }
-        // Ground ring follows the fighter, flat on the floor, with a soft pulse.
-        if (rec.ring && rec.ring.visible) {
-          rec.ring.position.set(rec.group.position.x, 0.03, rec.group.position.z);
-          rec.ring.material.opacity = 0.4 + 0.14 * Math.sin(tAcc * 3 + rec.phase);
         }
         // Label tracks the fighter and fades with camera distance so far names recede.
         if (rec.label) {
