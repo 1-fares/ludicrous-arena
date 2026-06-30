@@ -24,8 +24,6 @@ const API = new URLSearchParams(location.search).get("api")
 const POLL_HZ = 8;
 
 const PALETTE = [0x7cc4ff, 0xff7c7c, 0x9cff7c, 0xffd27c, 0xc77cff, 0x7cffe1, 0xff7cd2, 0xe1ff7c];
-const texLoader = new THREE.TextureLoader();
-function loadTexture(url) { const t = texLoader.load(url); t.colorSpace = THREE.SRGBColorSpace; return t; }
 const statusEl = document.getElementById("status");
 const scoreboard = document.getElementById("scoreboard");
 const sbTitle = document.getElementById("sbtitle");
@@ -504,17 +502,8 @@ function makeSkirmishRenderer() {
     // Wall boxes share one geometry and one solid material; individual wall meshes are
     // created lazily in updateWalls so a cell first seen mid-crack still gets a box.
     wallGroup = new THREE.Group();
-    // Walls are maze hedges: a BoxGeometry (6 face groups) carries a darker clipped-
-    // boxwood texture on the four sides and a brighter top-of-hedge texture on top, so
-    // the cover reads as trimmed bushes. Textures are created per build (disposeTree
-    // frees a material's map on rebuild; the JPEGs are browser-cached so reload is cheap).
-    wallGeo = new THREE.BoxGeometry(0.98, WALL_H, 0.98);
-    const hedgeSide = new THREE.MeshStandardMaterial({ map: loadTexture("./textures/hedge_side.jpg"),
-      roughness: 1.0, metalness: 0.0, envMapIntensity: 0.1 });
-    const hedgeTop = new THREE.MeshStandardMaterial({ map: loadTexture("./textures/hedge_top.jpg"),
-      roughness: 1.0, metalness: 0.0, envMapIntensity: 0.1 });
-    // BoxGeometry group order: +x, -x, +y (top), -y (bottom, unseen), +z, -z.
-    wallSolidMat = [hedgeSide, hedgeSide, hedgeTop, hedgeSide, hedgeSide, hedgeSide];
+    wallGeo = new RoundedBoxGeometry(0.98, WALL_H, 0.98, 2, 0.06);
+    wallSolidMat = new THREE.MeshStandardMaterial({ color: 0x97a3b8, roughness: 0.85, metalness: 0.0, envMapIntensity: 0.25 });
     root.add(wallGroup);
   }
 
