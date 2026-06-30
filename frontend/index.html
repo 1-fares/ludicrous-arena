@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ludicrous Arena: Spectator</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -16,6 +19,8 @@
     #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; gap: 16px;
            align-items: center; padding: 10px 14px; background: linear-gradient(#0b0e14ee, #0b0e1400);
            pointer-events: none; }
+    #hud .brandwrap { display: inline-flex; align-items: center; gap: 9px; }
+    #hud .logo { height: 26px; width: 26px; display: block; }
     #hud .brand { font-weight: 700; letter-spacing: .5px; color: #7cc4ff; }
     #hud select, #hud button { pointer-events: auto; background: #121826; color: #cdd6e4;
            border: 1px solid #243049; border-radius: 6px; padding: 5px 8px; font: inherit; }
@@ -97,7 +102,7 @@
   <div id="scene"></div>
   <div id="vignette"></div>
   <div id="hud">
-    <span class="brand">LUDICROUS ARENA</span>
+    <span class="brandwrap"><img class="logo" src="/logo.png" alt="" /><span class="brand">LUDICROUS ARENA</span></span>
     <span id="adminbar" hidden>
       <span class="pill">ADMIN</span>
       <button id="start" title="Start the arena" hidden>start</button>
