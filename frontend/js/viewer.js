@@ -202,7 +202,19 @@ function clearRoot() {
   for (const r of Object.values(RENDERERS)) r.reset?.();
 }
 
-function colorFor(i) { return PALETTE[i % PALETTE.length]; }
+// Distinct colour per player index. The first few use the hand-picked palette; beyond
+// it, hues are spread by the golden angle so any number of players stay distinguishable
+// (memoised, so a big roster does not re-derive colours every frame).
+const _colorCache = new Map();
+function colorFor(i) {
+  if (i < PALETTE.length) return PALETTE[i];
+  let c = _colorCache.get(i);
+  if (c === undefined) {
+    c = new THREE.Color().setHSL(((i * 137.508) % 360) / 360, 0.62, 0.66).getHex();
+    _colorCache.set(i, c);
+  }
+  return c;
+}
 const lerpN = (a, b, t) => a + (b - a) * t;
 const hex = (c) => "#" + (c).toString(16).padStart(6, "0");
 const hexA = (c, a) => `rgba(${(c >> 16) & 255},${(c >> 8) & 255},${c & 255},${a})`;
@@ -1146,9 +1158,12 @@ function renderScores(rows, legend) {
   healthWrap.hidden = true;
   if (sbTitle) sbTitle.textContent = "Scoreboard";
   const head = legend ? `<div class="legend">${esc(legend)}</div>` : "";
-  scoresEl.innerHTML = head + rows.map(r =>
+  const MAXROWS = 16;
+  let body = rows.slice(0, MAXROWS).map(r =>
     `<div class="row"><span class="who"><span class="dot" style="background:${hex(r.color)}"></span>${esc(r.label)}</span><b>${esc(r.score)}</b></div>`
   ).join("");
+  if (rows.length > MAXROWS) body += `<div class="muted">+${rows.length - MAXROWS} more players</div>`;
+  scoresEl.innerHTML = head + body;
 }
 
 // Skirmish standings panel. Two clearly separated sections so the match reads at a glance:
@@ -1182,10 +1197,14 @@ function renderSkirmishBoard(players, round, roundsToWin) {
   // Match progress: a row per player, sorted by round wins then this-round score, each with
   // a bar of exactly rounds-to-win segments (filled = wins) so closeness to the target is
   // obvious. A large target drops the bar for a plain count to keep the panel from overflowing.
+  // With a big roster the panel would run off-screen, so cap each section to the top
+  // MAXROWS and summarise the rest. The scoreboard is scrollable too, but a leaderboard
+  // of the front-runners plus a tally reads better than a hundred-row list.
+  const MAXROWS = 14;
   const ranked = players.slice().sort((a, b) => (b.wins - a.wins) || (b.score - a.score));
   const bigTarget = roundsToWin > 15;
   const endless = !roundsToWin;            // 0 = endless: a running tally, no target bar
-  const progRows = ranked.map(p => {
+  let progRows = ranked.slice(0, MAXROWS).map(p => {
     const wins = `<span class="winnum">${esc(p.wins)}</span>`;
     const tail = endless
       ? `<span class="winnum muted">won</span>`
@@ -1194,10 +1213,20 @@ function renderSkirmishBoard(players, round, roundsToWin) {
         : `<span class="bar" title="${esc(p.wins)} of ${esc(roundsToWin)} round wins">${winSegs(p.wins, roundsToWin)}</span>`;
     return `<div class="prow"><span class="who"><span class="dot" style="background:${hex(p.color)}"></span>${esc(p.name)}</span>${wins}${tail}</div>`;
   }).join("");
+  if (ranked.length > MAXROWS) progRows += `<div class="muted">+${ranked.length - MAXROWS} more players</div>`;
 
   // This round: each fighter's live state in plain words plus this round's score. Hearts for
-  // the living, "revealed" for an exposed camper, "down"/"fell" for the two ways out.
-  const roundRows = players.map(thisRoundRow).join("");
+  // the living, "revealed" for an exposed camper, "down"/"fell" for the two ways out. With
+  // many players a per-fighter list is noise, so collapse it to a live tally.
+  let roundRows;
+  if (players.length > MAXROWS) {
+    const fighting = players.filter(p => p.alive && !p.out).length;
+    const down = players.filter(p => !p.alive && !p.out).length;
+    const fell = players.filter(p => p.out).length;
+    roundRows = `<div class="prow"><span class="who">${fighting} fighting · ${down} down · ${fell} fell</span></div>`;
+  } else {
+    roundRows = players.map(thisRoundRow).join("");
+  }
 
   scoresEl.innerHTML =
     subtitle + roundLine +
@@ -1326,8 +1355,8 @@ function connect(matchId, gameId) {
         const need = info.players.length >= min ? "ready to start" : `waiting for ${min - info.players.length} more`;
         if (frame.scene) { r.update(frame.scene); setBanner(null); }              // real maze + players
         else if (gameId === "skirmish" && info.players.length) { r.update(lobbyScene(info)); setBanner(null); }
-        else { setBanner(`<b>${esc(titleFor(gameId))}</b><div class="bsub">${info.players.length}/${info.max_players} joined · ${need}</div>`); scoreboard.hidden = true; }
-        statusEl.textContent = `${titleFor(gameId)} · Lobby · ${info.players.length}/${info.max_players} joined · ${need}`;
+        else { setBanner(`<b>${esc(titleFor(gameId))}</b><div class="bsub">${info.players.length} joined · ${need}</div>`); scoreboard.hidden = true; }
+        statusEl.textContent = `${titleFor(gameId)} · Lobby · ${info.players.length} joined · ${need}`;
         return;
       }
       // Tell the scoreboard whether this is the final, settled state and who won, so its

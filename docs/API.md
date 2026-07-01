@@ -91,7 +91,7 @@ you get back from `GET .../state`.
     "id": "skirmish",
     "title": "Skirmish",
     "mode": "deathmatch",
-    "min_players": 2, "max_players": 8,
+    "min_players": 2, "max_players": 200,
     "teams": [],
     "tick_rate": 10.0,
     "realtime": true,
@@ -186,6 +186,13 @@ for the next round). The admin can start a match with whoever is present, so gam
 do not need a full lobby. Returns the updated `MatchInfo`. The reliable way to learn
 your own match-local `player_id` is to read `seat.player_id` from `GET .../state`
 once the match is running (it is keyed to your token, not your name or join order).
+
+**Capacity.** There is no small player cap: a match takes as many players as join
+(the `max_players` on the game is a large storage-safety ceiling, since the whole
+live match serializes into one record, not a gameplay limit). Only at that ceiling
+does a new join get `409` `match is at capacity (<N> players)`; a re-join of an
+existing seat is always allowed. In skirmish, late joiners spawn on a free interior
+cell and play from the current round.
 
 ### `POST /v1/matches/{match_id}/start`
 Force a lobby match to start (needs `min_players`). Auth required. Only needed when

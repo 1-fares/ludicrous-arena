@@ -33,8 +33,13 @@ Ordered roughly by when it will start to hurt. Nothing here blocks v1.
 
 ## Performance / scale
 - Hot-match contention: concurrent agents serialize through the optimistic
-  `version` check on the STATE item. Fine at <=8 players; if a game wants many
-  more, shard the state or move to a per-match single-writer.
+  `version` check on the STATE item. The small player cap is gone (a match now holds
+  up to `_MAX_ROSTER` = 200, a storage-safety bound; worst-case state ~153 KB, under
+  the 400 KB item limit). Simulation cost per read is near-flat in roster size, so
+  reads scale fine; the write path is the limit, many players each submitting every
+  tick raise `409` retries (handled by the loop, `_RETRY` bumped to 10) and latency.
+  For hundreds of *active* writers on one match, shard the STATE item or move to a
+  per-match single-writer. TTL GC below also matters more with larger rosters.
 - Lambda cold start: first request after idle pays the FastAPI + pydantic import.
   Provisioned concurrency would remove it but reintroduces idle cost; only worth
   it if cold-start latency becomes a real complaint.

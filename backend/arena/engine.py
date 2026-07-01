@@ -61,8 +61,16 @@ from arena.store import Conflict, StateRecord, Store
 # bound; the next write snaps its wall clock forward (see submit_actions).
 _MAX_CATCHUP = 8000
 _MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
-_MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
-_RETRY = 6              # optimistic-write attempts before giving up
+_RETRY = 10             # optimistic-write attempts before giving up (higher: more players contend on the one STATE item)
+
+# Safety ceiling on a match roster. There is no small gameplay cap on players -- a
+# match takes as many as join -- but the whole live match state serializes into one
+# DynamoDB item (400 KB hard limit), so the roster must stay well under what would
+# blow that. At a few hundred bytes per fighter this leaves comfortable headroom.
+# Games advertise their own max_players (also large); the effective cap is the lower
+# of the two. This is a guard against silent item-too-large write failures, not a
+# design limit: raise it only alongside a plan to shard state off the single item.
+_MAX_ROSTER = 200
 
 
 class NotParticipant(Exception):
@@ -158,8 +166,13 @@ class Engine:
             existing = next((p for p in info.players if p.user_id == user_id), None)
             if existing:
                 return info
-            if len(info.players) >= game.meta.max_players:
-                raise ValueError("match full")
+            # Re-joins (handled above) are always allowed; only a genuinely new
+            # participant is bounded. The cap is the storage safety ceiling, not a
+            # small gameplay limit -- a match holds as many players as join, up to
+            # what the single state item can safely carry.
+            cap = min(game.meta.max_players, _MAX_ROSTER)
+            if len(info.players) >= cap:
+                raise ValueError(f"match is at capacity ({cap} players)")
             teams = game.meta.teams
             assigned = team if team in teams else (
                 teams[len(info.players) % len(teams)] if teams else None)

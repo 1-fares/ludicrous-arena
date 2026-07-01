@@ -730,3 +730,40 @@ def test_you_ground_reports_standing_tile_decay():
     # A central kept-core tile never falls: falls_in is null.
     f.x, f.y = 6, 6
     assert g.observe(st, f_id)["you"]["ground"]["falls_in"] is None
+
+
+def test_many_players_spawn_distinct_and_run():
+    # No small player cap: a large roster spawns on distinct cells and the game's
+    # methods (tick/observe/render) and serialization all handle it.
+    g = _game()
+    st = g.init_state({"grid": 20, "seed": 3}, _slots(40))
+    assert len(st.fighters) == 40
+    cells = [(f.x, f.y) for f in st.fighters.values()]
+    assert len(set(cells)) == 40                       # every fighter on its own cell
+    g.tick(st, 0.1)
+    for pid in list(st.fighters)[:3]:
+        assert "you" in g.observe(st, pid)
+    assert len(g.render(st)["players"]) == 40
+    restored = g.decode_state(json.loads(json.dumps(g.encode_state(st))))
+    assert g.render(restored) == g.render(st)          # round-trips with a big roster
+
+
+def test_late_joiners_get_distinct_cells():
+    # add_player keeps placing arrivals on free cells past the old cap of 8.
+    g = _game()
+    st = g.init_state({"grid": 16, "seed": 5}, _slots(2))
+    from arena.models import PlayerSlot
+    for i in range(3, 26):                              # grow to 25 via add_player
+        g.add_player(st, PlayerSlot(player_id=f"p{i}", user_id=f"u{i}", display_name=f"U{i}"))
+    cells = [(f.x, f.y) for f in st.fighters.values()]
+    assert len(st.fighters) == 25 and len(set(cells)) == 25
+
+
+def test_small_dense_grid_stays_open():
+    # The wall reserve is decoupled from max_players; a small, dense grid must not end
+    # up wall-free or unspawnable.
+    g = _game()
+    st = g.init_state({"grid": 11, "seed": 1, "wall_density": 0.5}, _slots(4))
+    open_cells = st.grid * st.grid - len(st.walls)
+    assert open_cells >= 4 and len(st.fighters) == 4
+    assert len(st.walls) > 0                            # not zeroed out

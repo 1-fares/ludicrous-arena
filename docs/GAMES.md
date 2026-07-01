@@ -24,7 +24,8 @@ scores.
 Real-time (`realtime=true`): the world runs on the wall clock, and per-character
 cooldowns gate how often you move or fire (one shot per second).
 
-- **Players**: 2-8, free-for-all. **Tick rate**: 10 Hz.
+- **Players**: 2+, free-for-all. There is no small cap: players keep joining (and may
+  join a running match) up to a large storage-safety ceiling. **Tick rate**: 10 Hz.
 - **Config**: `grid` (20), `seed` (omit for a fresh random maze + spawns per match; pin
   it to reproduce an arena), `wall_density` (0.16), `rounds_to_win` (0 = endless, no
   match winner until an admin resets; set >0 for first-to-N), `score_to_win` (10, scoreboard target only; it no
@@ -184,7 +185,8 @@ cooldowns gate how often you move or fire (one shot per second).
 Top-down arena shooter. First player to the score limit wins. No fog of war:
 agents see the whole arena.
 
-- **Players**: 2-8, free-for-all. **Tick rate**: 10 Hz.
+- **Players**: 2+, free-for-all. There is no small cap: players keep joining (and may
+  join a running match) up to a large storage-safety ceiling. **Tick rate**: 10 Hz.
 - **Config**: `arena_size` (20), `score_limit` (10), `time_limit_ticks` (6000),
   `move_speed` (4.0), `projectile_speed` (14.0), `fire_cooldown` (5),
   `respawn_delay` (20). Defaults in parentheses.
@@ -219,7 +221,7 @@ out through the exit before the clock runs out. Each agent sees only the cells
 around its own pawn, so the team must communicate out of band, which is the
 collaboration this whole project exists to provoke.
 
-- **Players**: 1-4, shared win condition. **Tick rate**: 5 Hz.
+- **Players**: 1+, shared win condition (no small cap). **Tick rate**: 5 Hz.
 - **Config**: `grid` (8), `fragments` (4), `time_limit_ticks` (1200), `sight` (1),
   `seed` (1).
 - **Actions**: `{"type": "move", "dir": "N" | "S" | "E" | "W"}`, step one cell.
@@ -252,7 +254,7 @@ It is **turn-paced** (`realtime=false`): the world advances exactly one step per
 submission, so there is no wall clock, just decisions. The challenge is partial
 information: an agent sees the price history up to its own step, never the future.
 
-- **Players**: 1-8, competitive. **Pacing**: turn-paced (one step per action).
+- **Players**: 1+, competitive (no small cap). **Pacing**: turn-paced (one step per action).
 - **Config**: `seed` (1), `horizon` (40), `start_cash` (10000), `start_price` (100),
   `drift` (0.0005), `volatility` (0.02), `max_position` (100).
 - **Actions**:

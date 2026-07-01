@@ -118,7 +118,7 @@ META = GameMeta(
     description="Grid-maze tactical shooter. Move a cell at a time, turn in 90-degree steps, see only forward through a narrow cone. Three hits and you are down. Every elimination scores a point and new ground scores a sliver, while camping in one cell exposes your position to all enemies; first to 10 wins the game.",
     mode=GameMode.deathmatch,
     min_players=2,
-    max_players=8,
+    max_players=200,
     teams=[],
     tick_rate=10.0,
     realtime=True,
@@ -378,9 +378,13 @@ def _build_maze(cfg: dict[str, Any]) -> tuple[set[tuple[int, int]], list[tuple[i
     # redundant. Cover stays interior only (off the outermost row and column).
     interior = [(x, y) for x in range(1, g - 1) for y in range(1, g - 1)]
     density = max(0.0, min(0.5, cfg["wall_density"]))   # clamp, defense in depth
-    # Cap the wall count so at least max_players interior cells stay open: this
-    # guarantees enough spread-out spawns and prevents an unfillable target.
-    target = min(int(len(interior) * density), max(0, len(interior) - META.max_players))
+    # Cap the wall count so plenty of interior cells stay open for spawns: never place
+    # more than the density asks for, and always leave a healthy open margin (a floor
+    # plus a quarter of the interior). Decoupled from max_players (now large, so tying
+    # the reserve to it would zero out walls on small grids); many-player spawning is
+    # handled gracefully by _pick_spawns and add_player falling back as cells fill.
+    reserve = max(16, len(interior) // 4)
+    target = min(int(len(interior) * density), max(0, len(interior) - reserve))
     placed = 0
     attempts = 0
     while placed < target and attempts < target * 40 + 100:   # bounded: always terminates

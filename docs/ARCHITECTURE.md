@@ -121,8 +121,16 @@ differs only in the store and the Mangum entrypoint.
 
 ## Tradeoffs (honest)
 
-- **Concurrency on a hot match**: serialized by the version check; contention is
-  bounded by the small player counts (<= 8). A pathological hot match retries.
+- **Concurrency on a hot match**: every action serializes through the optimistic
+  version check on the single STATE item. There is no small player cap (a match takes
+  as many as join, up to a storage-safety ceiling), and the simulation cost per read
+  is near-flat in the roster size (advancing the world is dominated by the O(grid^2)
+  collapse math, not the player count, measured ~20% slower at 50 players than at 8).
+  So *compute* scales fine; the write path is the real limit: with many players each
+  submitting every tick, the version check produces more `409` retries (the loop
+  handles them, `_RETRY` is generous). This degrades gracefully into higher latency
+  rather than failing. Sharding the STATE item (per-match single-writer or per-player
+  shards) is the fix if a single match ever needs hundreds of *active* writers.
 - **Twitch real-time**: high-frequency adversarial games are the weakest fit;
   motion between polls is client-side interpolation, not server truth. Fine for
   the cooperative / resource / scenario games this project targets; the deathmatch

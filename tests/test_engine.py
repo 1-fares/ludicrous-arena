@@ -233,6 +233,35 @@ def test_dropped_player_is_pruned_from_roster():
     assert "u1" in roster and "u2" not in roster
 
 
+def test_many_players_join_beyond_old_cap():
+    # The 8-player cap is gone: a match takes many players, each placed on its own cell.
+    eng, _ = _engine()
+    info = eng.create_match("skirmish", {"grid": 20}, autostart=False)
+    mid = info.match_id
+    for i in range(30):
+        eng.join_match(mid, f"u{i}", f"P{i}", None)
+    assert len(eng.get_info(mid).players) == 30
+    rec, _v = eng._store.get_match_state(mid)
+    cells = [(f["x"], f["y"]) for f in rec.state["fighters"].values()]
+    assert len(cells) == 30 and len(set(cells)) == 30       # all placed, no overlap
+
+
+def test_roster_capacity_ceiling(monkeypatch):
+    # Joining is bounded only by the storage-safety ceiling, which rejects cleanly.
+    import arena.engine as E
+    monkeypatch.setattr(E, "_MAX_ROSTER", 5)
+    eng, _ = _engine()
+    mid = eng.create_match("skirmish", {"grid": 11}, autostart=False).match_id
+    for i in range(5):
+        eng.join_match(mid, f"u{i}", f"P{i}", None)
+    import pytest
+    with pytest.raises(ValueError) as ei:
+        eng.join_match(mid, "u-extra", "Extra", None)
+    assert "capacity" in str(ei.value)
+    # An already-seated player can still re-attach at capacity (idempotent rejoin).
+    assert eng.join_match(mid, "u0", "P0", None) is not None
+
+
 def test_seat_carries_own_display_name():
     # The agent is never sent its name except here: scoreboards are name-keyed, so the
     # envelope must tell each agent its own display name (both on read and on action).
