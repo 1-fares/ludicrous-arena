@@ -97,9 +97,31 @@
     #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 5;
       background: radial-gradient(ellipse at center, transparent 52%, rgba(4,7,12,0.62) 100%); }
     #hud, #scoreboard, #hint, #toasts, #banner { z-index: 10; }
+    /* PAUSED overlay: shown by default while the arena is offline (API kill switch off,
+       so DynamoDB/Lambda cost ~$0). It covers everything so it is seen immediately, even
+       with the API down. To RESUME: re-enable the API (api-switch.auto.tfvars) and add
+       hidden to <div id="paused"> (or delete it), then redeploy the frontend. */
+    #paused { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center;
+      justify-content: center; text-align: center; padding: 24px;
+      background: radial-gradient(circle at 50% 38%, #16110a 0%, #06080e 68%); }
+    #paused .pbox { max-width: 700px; }
+    #paused .plogo { width: 88px; height: 88px; margin: 0 0 20px; }
+    #paused h1 { margin: 0 0 12px; font-size: clamp(40px, 9vw, 96px); letter-spacing: 5px;
+      color: #ffb14a; text-shadow: 0 0 34px rgba(255,140,40,.5); }
+    #paused p { margin: 8px 0; font-size: clamp(16px, 3vw, 24px); color: #cdd6e4; }
+    #paused .pask { margin-top: 22px; font-size: clamp(19px, 3.6vw, 30px); color: #9fe8ff; }
+    #paused .pask b { color: #fff; }
   </style>
 </head>
 <body>
+  <div id="paused">
+    <div class="pbox">
+      <img class="plogo" src="/logo.png" alt="" />
+      <h1>GAME PAUSED</h1>
+      <p>The arena is offline for now to save on running costs.</p>
+      <p class="pask">Ask <b>Fares</b> if you'd like to play.</p>
+    </div>
+  </div>
   <div id="scene"></div>
   <div id="vignette"></div>
   <div id="hud">
