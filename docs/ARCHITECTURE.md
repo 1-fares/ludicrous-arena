@@ -111,6 +111,15 @@ provides `encode_state` / `decode_state` (the only addition to the `Game`
 interface for the serverless model). Games keep ergonomic in-memory state
 (dataclasses, sets, tuples) and flatten it to JSON-safe dicts at the boundary.
 
+**Keep the persisted STATE item small, it is the dominant active cost.** DynamoDB
+bills each conditional write per rounded-up KB, and this item is rewritten on every
+action, so its size multiplies the whole write bill. Two rules follow: (1) do not
+persist anything immutable or recomputable, skirmish omits `walls`/`spawns`
+(deterministic from `cfg.seed`) and rebuilds them in `decode_state`, which cut the
+item ~34%; (2) drop per-entity bookkeeping once it is no longer read, skirmish
+clears a fighter's `visited` list once its territory caps. These are pure cost
+optimizations with no gameplay effect (verified by the render round-trip test).
+
 ## Local development and tests
 
 The same FastAPI app runs locally under uvicorn with `ARENA_STORE=memory`

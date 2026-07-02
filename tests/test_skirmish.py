@@ -334,9 +334,10 @@ def test_new_ground_scores_territory_up_to_the_cap():
         p1.move_cd = 0
         g.apply(st, "p1", {"type": "move", "dir": "forward"})
     # Two new cells reach the cap (0.5 + 0.5); further new ground earns nothing, and
-    # the visited list stops growing so state stays bounded.
+    # once capped the visited list is dropped entirely (no longer needed) so the
+    # persisted state stays small.
     assert p1.terr == 1.0
-    assert len(p1.visited) == 2
+    assert p1.visited == []
     obs = g.observe(st, "p1")["you"]
     assert obs["territory"] == 1.0 and obs["frags"] == 0 and obs["score"] == 1.0
 
@@ -767,3 +768,35 @@ def test_small_dense_grid_stays_open():
     open_cells = st.grid * st.grid - len(st.walls)
     assert open_cells >= 4 and len(st.fighters) == 4
     assert len(st.walls) > 0                            # not zeroed out
+
+
+def test_state_omits_immutable_maze_and_recomputes():
+    # Cost optimization: walls/spawns are immutable + deterministic from cfg, so they are
+    # not persisted; decode rebuilds them identically. Full render round-trip must hold.
+    g = _game()
+    st = g.init_state({"grid": 20, "seed": 3}, _slots(4))
+    enc = g.encode_state(st)
+    assert "walls" not in enc and "spawns" not in enc
+    dec = g.decode_state(json.loads(json.dumps(enc)))
+    assert dec.walls == st.walls and dec.spawns == st.spawns
+    assert g.render(dec) == g.render(st)
+    # smaller than a blob that carried them
+    legacy = dict(enc, walls=st.walls, spawns=st.spawns)
+    assert len(json.dumps(enc)) < len(json.dumps(legacy))
+    # and a legacy blob that still carries them still decodes
+    assert g.decode_state(legacy).walls == st.walls
+
+
+def test_visited_dropped_once_territory_caps():
+    # Cost optimization: `visited` is only needed until territory caps, then dropped so the
+    # persisted fighter stays small. Gameplay (scoring) is unchanged.
+    g = _game()
+    st = g.init_state({"grid": 20, "seed": 1, "cell_bonus": 1.0, "territory_cap": 3.0,
+                       "collapse": False}, _slots(1))
+    st.walls = []                                  # open lane so moves are not blocked
+    f = st.fighters["p1"]
+    f.x, f.y, f.facing = 2, 9, 1                    # facing east, mid-row
+    for _ in range(5):
+        f.move_cd = 0
+        g.apply(st, "p1", {"type": "move", "dir": "forward"})
+    assert f.terr >= 3.0 and f.visited == []

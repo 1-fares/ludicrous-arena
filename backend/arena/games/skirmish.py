@@ -714,10 +714,16 @@ class Skirmish:
             f.y += dy
             f.move_cd = state.cfg["move_cooldown"]
             # Territory: first time on this cell (and not yet capped) earns a sliver.
-            # The cap also bounds how many cells we remember, keeping state small.
-            if f.terr < state.cfg["territory_cap"] and [f.x, f.y] not in f.visited:
+            # `visited` only exists to stop a cell scoring twice; once territory is capped
+            # it is never read again, so drop it then to keep the persisted state small
+            # (a full visited list is ~640 bytes per fighter). Guarded on cell_bonus > 0 so
+            # a disabled bonus never grows visited unboundedly.
+            cap = state.cfg["territory_cap"]
+            if state.cfg["cell_bonus"] > 0 and f.terr < cap and [f.x, f.y] not in f.visited:
                 f.visited.append([f.x, f.y])
                 f.terr += state.cfg["cell_bonus"]
+                if f.terr >= cap:
+                    f.visited = []          # capped: no longer needed, free the bytes
         elif t == "fire":
             dx, dy = DIRS[f.facing]
             state.bullets.append(Bullet(owner=player_id, x=float(f.x), y=float(f.y),
@@ -1117,8 +1123,13 @@ class Skirmish:
     # -- persistence -------------------------------------------------------
 
     def encode_state(self, state: State) -> dict[str, Any]:
+        # walls and spawns are IMMUTABLE for the life of a match and fully determined by
+        # cfg (seed/grid/wall_density), so they are NOT persisted -- decode_state rebuilds
+        # them from cfg. This keeps the STATE item (rewritten under a conditional write on
+        # every action) small: they were ~2.3 KB / ~34% of it, and DynamoDB bills writes
+        # per rounded-up KB, so dropping them cuts the per-write cost proportionally.
         return {
-            "cfg": state.cfg, "grid": state.grid, "walls": state.walls, "spawns": state.spawns,
+            "cfg": state.cfg, "grid": state.grid,
             "fighters": {pid: asdict(f) for pid, f in state.fighters.items()},
             "bullets": [asdict(b) for b in state.bullets],
             "round": state.round, "phase": state.phase, "inter_cd": state.inter_cd,
@@ -1129,8 +1140,17 @@ class Skirmish:
         # Merge in config defaults so a match created before a config key existed
         # (e.g. rounds_to_win, the collapse knobs) decodes with the new defaults
         # filled in, instead of raising KeyError when the rules read a missing key.
+        cfg = merge_defaults(self.meta, data["cfg"])
+        # Rebuild the immutable maze from cfg (deterministic in the seed). Legacy blobs
+        # that still carry walls/spawns are honoured for a seamless transition.
+        if "walls" in data and "spawns" in data:
+            walls, spawns = data["walls"], data["spawns"]
+        else:
+            wset, pool = _build_maze(cfg)
+            walls = [[x, y] for (x, y) in sorted(wset)]
+            spawns = [[x, y] for (x, y) in pool]
         return State(
-            cfg=merge_defaults(self.meta, data["cfg"]), grid=data["grid"], walls=data["walls"], spawns=data["spawns"],
+            cfg=cfg, grid=data["grid"], walls=walls, spawns=spawns,
             fighters={pid: Fighter(**f) for pid, f in data["fighters"].items()},
             bullets=[Bullet(**b) for b in data["bullets"]],
             round=data["round"], phase=data["phase"], inter_cd=data["inter_cd"],
