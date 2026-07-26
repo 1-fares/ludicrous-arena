@@ -98,7 +98,7 @@
       background: radial-gradient(ellipse at center, transparent 52%, rgba(4,7,12,0.62) 100%); }
     #hud, #scoreboard, #hint, #toasts, #banner { z-index: 10; }
     /* PAUSED overlay: shown by default while the arena is offline (API kill switch off,
-       so DynamoDB/Lambda cost ~$0). It covers everything so it is seen immediately, even
+       so Tablestore/FC cost ~$0). It covers everything so it is seen immediately, even
        with the API down. To RESUME: re-enable the API (api-switch.auto.tfvars) and add
        hidden to <div id="paused"> (or delete it), then redeploy the frontend. */
     #paused { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center;
@@ -114,7 +114,7 @@
   </style>
 </head>
 <body>
-  <div id="paused">
+  <div id="paused" hidden>
     <div class="pbox">
       <img class="plogo" src="/logo.png" alt="" />
       <h1>GAME PAUSED</h1>

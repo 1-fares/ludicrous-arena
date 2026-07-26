@@ -1126,7 +1126,7 @@ class Skirmish:
         # walls and spawns are IMMUTABLE for the life of a match and fully determined by
         # cfg (seed/grid/wall_density), so they are NOT persisted -- decode_state rebuilds
         # them from cfg. This keeps the STATE item (rewritten under a conditional write on
-        # every action) small: they were ~2.3 KB / ~34% of it, and DynamoDB bills writes
+        # every action) small: they were ~2.3 KB / ~34% of it, and Tablestore bills writes
         # per rounded-up KB, so dropping them cuts the per-write cost proportionally.
         return {
             "cfg": state.cfg, "grid": state.grid,

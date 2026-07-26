@@ -1,83 +1,88 @@
 # Deployment
 
-The arena runs as a scale-to-zero serverless stack. Idle cost is approximately
-zero; active cost is proportional to requests. Everything that holds data or runs
-code is in **Switzerland (`eu-central-2`, Zurich)**. The only resources outside that
-region are the CloudFront distributions (a global CDN) and their TLS certificate,
-which must be in `us-east-1`; that certificate is public and holds no data, and the
-files CloudFront serves are public static assets.
+The arena runs as a scale-to-zero serverless stack on Alibaba Cloud (Aliyun).
+Idle cost is approximately zero; active cost is proportional to requests.
+Everything that holds data or runs code is in **Singapore (`ap-southeast-1`)**.
 
 ## Topology
 
-| Hostname | Serves | AWS resources |
+| Hostname | Serves | Aliyun resources |
 |---|---|---|
-| `ludicrous-arena.com`, `www` | spectator viewer | S3 (eu-central-2) + CloudFront, cert in us-east-1 |
-| `api.ludicrous-arena.com` | the game API | Lambda + API Gateway HTTP API (eu-central-2), cert in eu-central-2 |
-| `docs.ludicrous-arena.com` | static docs site | S3 (eu-central-2) + CloudFront, cert in us-east-1 |
+| `ludicrous-arena.com` | spectator viewer + API | FC 3.0 function (bundled frontend + FastAPI) |
+| `api.ludicrous-arena.com` | the game API | same FC function, second custom domain |
 
-State lives in DynamoDB (`arena`, on-demand) in eu-central-2. Terraform state is in
-the private, versioned bucket `arena-tfstate-ACCOUNT_ID` (eu-central-2). A
-CloudWatch billing alarm at 5 USD is in us-east-1 (billing metrics exist only there).
+State lives in Tablestore (OTS, instance `arena-<suffix>`) in ap-southeast-1.
+Terraform state is in the private, versioned OSS bucket `arena-tfstate-aliyun`.
 
 ## First-time setup
 
 ```bash
-scripts/bootstrap-state.sh        # create the Terraform state bucket (once)
-terraform -chdir=terraform init   # uses the S3 backend
+scripts/bootstrap-state.sh        # create the Terraform state OSS bucket (once)
+terraform -chdir=terraform init   # uses the OSS backend
 ```
 
 `terraform/terraform.tfvars` carries the per-deployment values (region, domain,
-alert email). It is gitignored.
+cert paths). Copy from `terraform.tfvars.example` and adjust. It is gitignored.
 
 ## Phase 1: base stack (no custom domains)
 
-Brings the API and viewer up on the default AWS URLs. Independent of DNS.
+Brings the API and viewer up on the default FC URL. Independent of DNS.
 
 ```bash
-scripts/package-lambda.sh
+scripts/package-fc.sh
 terraform -chdir=terraform apply
-scripts/deploy-frontend.sh        # sync viewer to S3 + invalidate CloudFront
 ```
 
-Outputs `api_url`, `viewer_url`, and the Route53 `nameservers`.
+Outputs `fc_url` (the HTTP trigger URL). The viewer is at the same URL (open `/`).
 
-## DNS delegation (manual, at the registrar)
+## DNS + HTTPS (manual, Phase 2)
 
-The domain is registered at Namecheap. In Namecheap, set the domain's nameservers
-to **Custom DNS** with the four servers from `terraform output nameservers`. Verify
-the delegation reached the registry before applying Phase 2:
+Requires a domain you control. The FC custom domain needs:
 
-```bash
-dig +norecurse +noall +authority NS ludicrous-arena.com. @a.gtld-servers.net.
-# wait until this lists the awsdns-* servers, stably
-```
+1. **CNAME records** at your DNS provider:
+   ```
+   ludicrous-arena.com      CNAME  <account-id>.<region>.fc.aliyuncs.com
+   api.ludicrous-arena.com  CNAME  <account-id>.<region>.fc.aliyuncs.com
+   ```
+   (The exact CNAME target is shown in the FC console under your function's
+   custom domain, or use `<account-id>.<region>.fc.aliyuncs.com`.)
 
-## Phase 2: custom domains + docs site
+2. **TLS certificate** (RSA 2048+, not ECC — FC rejects ECDSA keys):
+   ```bash
+   acme.sh --issue -d ludicrous-arena.com -d api.ludicrous-arena.com \
+     --dns --keylength 2048
+   # Convert key to PKCS#8 if needed:
+   openssl pkcs8 -topk8 -nocrypt -in key.pem -out key.pk8.pem
+   ```
 
-Requires delegation to be live, ACM validates via the Route53 zone. With
-`domain_name` set in tfvars, the same `apply` adds two certificates, the API Gateway
-and docs custom domains, the docs site, and all the Route53 records.
-
-```bash
-terraform -chdir=terraform apply
-scripts/deploy-docs.sh            # build + sync the docs site
-```
+3. **Set in tfvars** and re-apply:
+   ```hcl
+   domain_name = "ludicrous-arena.com"
+   cert_path   = "/path/to/fullchain.pem"
+   key_path    = "/path/to/key.pk8.pem"
+   ```
+   ```bash
+   terraform -chdir=terraform apply
+   ```
 
 ## Issuing access tokens
 
 Players need a token. Mint one against the deployed table (only its hash is stored):
 
 ```bash
-ARENA_TABLE=arena AWS_DEFAULT_REGION=eu-central-2 \
+ARENA_TABLE=$(terraform -chdir=terraform output -raw ots_table) \
+OTS_ENDPOINT="https://<instance>.ap-southeast-1.ots.aliyuncs.com" \
+OTS_INSTANCE="<instance>" \
+ALIBABA_CLOUD_ACCESS_KEY_ID="..." \
+ALIBABA_CLOUD_ACCESS_KEY_SECRET="..." \
   backend/.venv/bin/python scripts/issue-token.py --user alice --name "Alice"
 ```
 
-Hand the plaintext token to the player out of band. Revoke by deleting the `TOKEN#`
-item (or setting `revoked=true`) in DynamoDB.
+Hand the plaintext token to the player out of band. Revoke by deleting the
+`TOKEN#` row (or setting `revoked=true`) in Tablestore.
 
 ## Day-to-day
 
-- Backend code change: `scripts/deploy-backend.sh` (repackages and updates the Lambda).
-- Viewer change: `scripts/deploy-frontend.sh`.
-- Docs change: `scripts/deploy-docs.sh`.
-- Full pipeline: `scripts/deploy.sh`.
+- Backend code change: `scripts/deploy-backend.sh` (repackages and updates the FC function).
+- Full pipeline: `scripts/deploy.sh` (tests + package + terraform apply).
+- Toggle the API on/off: edit `terraform/api-switch.auto.tfvars`, then `scripts/deploy.sh`.

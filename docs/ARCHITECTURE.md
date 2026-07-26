@@ -2,37 +2,36 @@
 
 ## One sentence
 
-The whole API is one Lambda (a FastAPI app behind Mangum) fronted by an API
-Gateway HTTP API; match state lives in DynamoDB and the simulation is advanced
-lazily, on demand, inside request handlers, so the service costs nothing when
-nobody is playing and a static three.js page polls a render endpoint to spectate.
+The whole API is one Function Compute function (a FastAPI app behind an ASGI
+adapter) with a built-in HTTP trigger; match state lives in Tablestore (OTS) and
+the simulation is advanced lazily, on demand, inside request handlers, so the
+service costs nothing when nobody is playing and a static three.js page polls a
+render endpoint to spectate.
 
 ## Why this shape: cost
 
 The hard requirement is near-zero cost when idle. That rules out anything
-always-on. An ALB is a fixed ~$16/month and AWS states it does not scale to zero;
-a Fargate task bills for every running hour. Together they are ~$25-35/month even
-with no players. So the design is built entirely from services that bill per use
+always-on. So the design is built entirely from services that bill per use
 and scale to zero:
 
 | Service | Idle cost | Role |
 |---|---|---|
-| API Gateway HTTP API | $0 | front door, proxies all paths to the Lambda |
-| Lambda | $0 | the FastAPI app; one invocation per request |
-| DynamoDB (on-demand) | $0 | tokens, users, match metadata, live match state |
-| S3 + CloudFront | ~$0 | static spectator viewer |
+| FC HTTP trigger | $0 | front door, proxies all paths to the function |
+| Function Compute | $0 | the FastAPI app; one invocation per request |
+| Tablestore (OTS) | $0 | tokens, users, match metadata, live match state |
+| OSS + SLS | ~$0 | deploy artifact storage + logs |
 
-Active cost is proportional to reads and actions: a Lambda invoke + a DynamoDB
-read (reads) or read+conditional-write (actions) per request, plus cheap HTTP API
-and DynamoDB request charges. Nobody playing means nothing running.
+Active cost is proportional to reads and actions: an FC invoke + a Tablestore
+read (reads) or read+conditional-write (actions) per request. Nobody playing
+means nothing running.
 
 ## The cost of that: no server loop
 
-A continuously-ticking authoritative loop has no home here (Lambda is
+A continuously-ticking authoritative loop has no home here (Function Compute is
 request/response, nothing is always on). So the simulation is **deterministic and
 evaluated on demand**:
 
-- Match state persists in DynamoDB with `last_tick` and the wall-clock time it was
+- Match state persists in Tablestore with `last_tick` and the wall-clock time it was
   materialized at.
 - On a **read** (agent observation or spectator scene) the handler loads the
   state, fast-forwards the simulation in memory to *now* (`elapsed * tick_rate`
@@ -56,28 +55,29 @@ polls (with client-side mesh interpolation between polls) for smooth motion.
         │  HTTP poll: state, actions               │  HTTP poll: scene
         ▼                                           ▼
  ┌─────────────────────────────────────────────────────────┐
- │              API Gateway HTTP API  ($default)             │
+ │              FC HTTP trigger  (anonymous)                 │
  └─────────────────────────────────────────────────────────┘
-        │  AWS_PROXY (every path)
+        │  every path
         ▼
  ┌─────────────────────────────────────────────────────────┐
- │   Lambda: arena.server:app via Mangum (FastAPI)           │
+ │   FC: arena.server:app via ASGI adapter (FastAPI)         │
  │                                                           │
  │   Engine (stateless): load state, project to now,         │
  │     apply action, conditional write back                  │
- │   Registry: all game types (skirmish, deathmatch, lockdown, trading_desk)      │
- │   Store: DynamoStore (tokens, users, match meta + state)  │
+ │   Registry: all game types (skirmish, deathmatch,         │
+ │     lockdown, trading_desk)                               │
+ │   Store: OTSStore (tokens, users, match meta + state)     │
  └─────────────────────────────────────────────────────────┘
-        │  get/put items, conditional writes
+        │  get/put rows, conditional writes
         ▼
-   DynamoDB (single table)        S3 + CloudFront (static viewer)
+   Tablestore (single table)      OSS + SLS (deploy + logs)
 ```
 
 Source map:
 
 | Concern | File |
 |---|---|
-| HTTP surface + Lambda handler | `backend/arena/server.py` |
+| HTTP surface + FC handler | `backend/arena/server.py` |
 | On-demand simulation (project / apply / finalize) | `backend/arena/engine.py` |
 | Game extension point | `backend/arena/game.py` |
 | Wire schemas | `backend/arena/models.py` |
@@ -85,9 +85,9 @@ Source map:
 | Bearer-token auth | `backend/arena/auth.py` |
 | Bundled games | `backend/arena/games/*.py` |
 | Spectator viewer (polls scene) | `frontend/` |
-| AWS infra (API GW + Lambda + DynamoDB + S3/CloudFront) | `terraform/` |
+| Aliyun infra (FC + Tablestore + OSS + SLS) | `terraform/` |
 
-## DynamoDB single-table layout
+## Tablestore single-table layout
 
 ```
 pk                       sk                attributes
@@ -106,17 +106,17 @@ re-applies its own action, and writes again (`engine.submit_actions` retry loop)
 
 ## State serialization
 
-Because state round-trips through DynamoDB JSON on every action, each game
+Because state round-trips through Tablestore JSON on every action, each game
 provides `encode_state` / `decode_state` (the only addition to the `Game`
 interface for the serverless model). Games keep ergonomic in-memory state
 (dataclasses, sets, tuples) and flatten it to JSON-safe dicts at the boundary.
 
-**Keep the persisted STATE item small, it is the dominant active cost.** DynamoDB
-bills each conditional write per rounded-up KB, and this item is rewritten on every
+**Keep the persisted STATE row small, it is the dominant active cost.**
+Tablestore bills read/write throughput per KB, and this row is rewritten on every
 action, so its size multiplies the whole write bill. Two rules follow: (1) do not
 persist anything immutable or recomputable, skirmish omits `walls`/`spawns`
 (deterministic from `cfg.seed`) and rebuilds them in `decode_state`, which cut the
-item ~34%; (2) drop per-entity bookkeeping once it is no longer read, skirmish
+row ~34%; (2) drop per-entity bookkeeping once it is no longer read, skirmish
 clears a fighter's `visited` list once its territory caps. These are pure cost
 optimizations with no gameplay effect (verified by the render round-trip test).
 
@@ -124,39 +124,39 @@ optimizations with no gameplay effect (verified by the render round-trip test).
 
 The same FastAPI app runs locally under uvicorn with `ARENA_STORE=memory`
 (`MemoryStore` implements the identical versioning semantics in-process), so there
-is no need for DynamoDB or LocalStack to develop or test. Tests drive the engine
-with an injected clock, making wall-clock catch-up deterministic. The Lambda path
-differs only in the store and the Mangum entrypoint.
+is no need for Tablestore to develop or test. Tests drive the engine
+with an injected clock, making wall-clock catch-up deterministic. The FC path
+differs only in the store and the ASGI adapter entrypoint.
 
 ## Tradeoffs (honest)
 
 - **Concurrency on a hot match**: every action serializes through the optimistic
-  version check on the single STATE item. There is no small player cap (a match takes
+  version check on the single STATE row. There is no small player cap (a match takes
   as many as join, up to a storage-safety ceiling), and the simulation cost per read
   is near-flat in the roster size (advancing the world is dominated by the O(grid^2)
   collapse math, not the player count, measured ~20% slower at 50 players than at 8).
   So *compute* scales fine; the write path is the real limit: with many players each
   submitting every tick, the version check produces more `409` retries (the loop
   handles them, `_RETRY` is generous). This degrades gracefully into higher latency
-  rather than failing. Sharding the STATE item (per-match single-writer or per-player
+  rather than failing. Sharding the STATE row (per-match single-writer or per-player
   shards) is the fix if a single match ever needs hundreds of *active* writers.
 - **Twitch real-time**: high-frequency adversarial games are the weakest fit;
   motion between polls is client-side interpolation, not server truth. Fine for
   the cooperative / resource / scenario games this project targets; the deathmatch
   is the one game pushed into the discrete-tick model.
-- **Per-action latency**: gains a DynamoDB read + conditional write versus the
+- **Per-action latency**: gains a Tablestore read + conditional write versus the
   in-memory loop a container would have.
 - **Read work**: a read re-simulates from the last persisted tick to now; bounded
   by the match time limit, trivial in practice.
-- **Lambda cold start**: first request after idle pays a cold start (FastAPI +
+- **FC cold start**: first request after idle pays a cold start (FastAPI +
   pydantic import). Acceptable for this workload; provisioned concurrency is a
   knob if it ever matters, but it reintroduces idle cost.
 
 ## Backlog-worthy gaps
 
-- DynamoDB TTL on `MATCH#` items to garbage-collect finished matches and dead
-  lobbies (no eviction today).
-- Rate limiting per token at the API Gateway / Lambda edge.
-- Replays: append per-tick frames to S3 for playback.
+- Application-level GC on `MATCH#` rows to garbage-collect finished matches and
+  dead lobbies (Tablestore TTL is table-wide, so per-row expiry needs app logic).
+- Rate limiting per token at the FC trigger edge.
+- Replays: append per-tick frames to OSS for playback.
 
 See [BACKLOG.md](../BACKLOG.md).

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """arena: the operator CLI for running Ludicrous Arena games.
 
-One tool for the whole flow, no curl, no DynamoDB surgery:
+One tool for the whole flow, no curl, no Tablestore surgery:
 
     arena mint alice bob carol           # mint a player token per name (name lives in the token)
     arena mint --admin                   # mint (and cache) an admin token
@@ -17,8 +17,9 @@ One tool for the whole flow, no curl, no DynamoDB surgery:
 
 State lives in ~/.arena/ledger.json (api base, current match id, minted tokens, admin
 token), so brief/start/reset/etc. need no arguments after create. Player tokens carry
-the player's name; agents are handed only a token. Minting needs boto3 + AWS creds
-(same as scripts/issue-token.py); everything else is plain HTTP with the admin token.
+the player's name; agents are handed only a token. Minting needs the tablestore SDK +
+Aliyun creds (same as scripts/issue-token.py); everything else is plain HTTP with the
+admin token.
 """
 import argparse
 import json
@@ -29,7 +30,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-os.environ.setdefault("AWS_DEFAULT_REGION", "eu-central-2")  # boto3 region for minting
+os.environ.setdefault("ALICLOUD_REGION", "ap-southeast-1")  # for OTS endpoint resolution
 LEDGER = Path(os.environ.get("ARENA_HOME", Path.home() / ".arena")) / "ledger.json"
 DEFAULT_API = os.environ.get("ARENA_API", "https://api.ludicrous-arena.com")
 VIEWER = os.environ.get("ARENA_VIEWER", "https://ludicrous-arena.com")
@@ -79,8 +80,8 @@ def _match(led, override=None):
 def cmd_mint(led, args):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
     import secrets
-    from arena.store import DynamoStore  # noqa: E402
-    store = DynamoStore(table_name=os.environ.get("ARENA_TABLE"))
+    from arena.store import OTSStore  # noqa: E402
+    store = OTSStore(table_name=os.environ.get("ARENA_TABLE"))
 
     def issue(user_id, name, admin):
         token = "arena_" + secrets.token_urlsafe(32)

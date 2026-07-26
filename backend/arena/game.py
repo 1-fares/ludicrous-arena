@@ -7,7 +7,7 @@ a single event loop, so a slow ``tick`` stalls every match sharing the process.
 
 State is an arbitrary object of the game's choosing (a dataclass, a dict,
 whatever). The engine treats it as opaque. Because the server is serverless and
-holds no match in memory between requests, the engine persists state in DynamoDB
+holds no match in memory between requests, the engine persists state in Tablestore
 between every action: a game must therefore provide ``encode_state`` /
 ``decode_state`` to round-trip its state through JSON. Keep games deterministic so
 the engine can fast-forward the simulation to "now" on demand (see engine.py).

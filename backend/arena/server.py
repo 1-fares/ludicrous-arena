@@ -2,7 +2,7 @@
 
 Runs three ways off the same app object:
   local dev:   uvicorn arena.server:app --reload        (ARENA_STORE=memory)
-  Lambda:      handler = Mangum(app)                     (ARENA_STORE=dynamo)
+  FC 3.0:      handler(event, context)                   (ARENA_STORE=ots)
   tests:       starlette TestClient against `app`
 
 There is no WebSocket and no server loop: the world advances on demand inside
@@ -137,9 +137,26 @@ app = FastAPI(
     contact={"name": "Arena docs", "url": "https://github.com/"},
 )
 
-# The viewer is served from CloudFront, a different origin, and polls this API.
+# The viewer may be served from a different origin (e.g. a CDN or a separate
+# custom domain) and polls this API.
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
+
+
+# Master kill switch: when API_ENABLED=false (set via Terraform), API routes
+# return 503 so wrong-token and random internet traffic runs no game code and
+# touches no Tablestore, keeping cost near zero while the arena is idle. The
+# bundled static viewer still loads (its data calls just get errors).
+@app.middleware("http")
+async def _kill_switch(request, call_next):
+    import os
+    if os.environ.get("API_ENABLED", "true").lower() == "false":
+        path = request.url.path
+        if path.startswith("/v1/") or path == "/healthz":
+            return Response(status_code=503,
+                            content='{"detail":"arena is paused"}',
+                            media_type="application/json")
+    return await call_next(request)
 
 _STORE = store.from_env()
 auth.set_store(_STORE)
@@ -156,8 +173,8 @@ _MATCH_ID = Path(description="Match id from POST /v1/matches.", examples=["ab12c
 
 @app.get("/healthz", response_model=HealthResponse, tags=["health"], summary="Liveness probe")
 def healthz() -> dict[str, Any]:
-    """Returns `ok: true` and the list of registered game ids. Used by the load
-    balancer / Lambda health check."""
+    """Returns `ok: true` and the list of registered game ids. Used by the
+    health check."""
     return {"ok": True, "games": [g.meta.id for g in registry.all_games()]}
 
 
@@ -388,12 +405,103 @@ def submit_actions(req: ActionRequest, match_id: str = _MATCH_ID,
         raise HTTPException(status_code=409, detail=str(e))
 
 
-# -- Lambda entrypoint ------------------------------------------------------
-# Mangum adapts this ASGI app to the API Gateway HTTP API event. Imported lazily
-# so local dev / tests do not require the dependency.
-try:
-    from mangum import Mangum
+# -- Bundled frontend (FC deployment) -----------------------------------------
+# In the FC package the frontend/ directory sits alongside arena/ at the zip
+# root. Mount it as a static catch-all so the one function serves both the API
+# and the spectator viewer. Skipped in local dev (frontend/ is not a sibling
+# of the installed package) and in tests.
+import os as _os
 
-    handler = Mangum(app)
-except ImportError:  # pragma: no cover -- only needed in the Lambda package
-    handler = None
+_frontend_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "frontend")
+if _os.path.isdir(_frontend_dir):
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+
+
+# -- FC 3.0 entrypoint ------------------------------------------------------
+# Function Compute 3.0 uses an event-based handler (not ASGI). This adapter
+# translates the FC HTTP trigger event into an ASGI scope, runs the FastAPI
+# app, and translates the response back. Imported lazily so local dev / tests
+# do not require the dependency.
+
+def handler(event, context):  # noqa: C901 -- the adapter is inherently procedural
+    """FC 3.0 HTTP trigger entry point."""
+    import asyncio
+    import base64
+    import json as _json
+
+    evt = _json.loads(event)
+
+    method = evt["requestContext"]["http"]["method"]
+    path = evt.get("rawPath", "/")
+    query_params = evt.get("queryParameters") or {}
+    query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
+    headers = evt.get("headers") or {}
+
+    body = evt.get("body") or ""
+    if evt.get("isBase64Encoded"):
+        body_bytes = base64.b64decode(body)
+    else:
+        body_bytes = body.encode("utf-8")
+
+    # Build the ASGI scope.
+    raw_headers = []
+    for k, v in headers.items():
+        raw_headers.append((k.lower().encode(), v.encode()))
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": evt["requestContext"]["http"].get("protocol", "HTTP/1.1").replace("HTTP/", ""),
+        "method": method,
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": query_string.encode(),
+        "headers": raw_headers,
+        "server": (headers.get("Host", "localhost").split(",")[0], 443),
+        "scheme": headers.get("X-Forwarded-Proto", "https"),
+        "client": None,
+        "root_path": "",
+    }
+
+    response_started: list = []
+    body_parts: list[bytes] = []
+
+    async def receive():
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            response_started.append(message)
+        elif message["type"] == "http.response.body":
+            body_parts.append(message.get("body", b""))
+
+    asyncio.run(app(scope, receive, send))
+
+    start = response_started[0]
+    status_code = start["status"]
+    resp_headers: dict[str, str] = {}
+    for name, value in start.get("headers", []):
+        n = name.decode() if isinstance(name, bytes) else name
+        v = value.decode() if isinstance(value, bytes) else value
+        if n.lower() == "set-cookie":
+            existing = resp_headers.get("Set-Cookie")
+            resp_headers["Set-Cookie"] = f"{existing}\n{v}" if existing else v
+        else:
+            resp_headers[n] = v
+
+    raw_body = b"".join(body_parts)
+    is_base64 = False
+    try:
+        response_body = raw_body.decode("utf-8")
+    except UnicodeDecodeError:
+        response_body = base64.b64encode(raw_body).decode("ascii")
+        is_base64 = True
+
+    return {
+        "statusCode": status_code,
+        "headers": resp_headers,
+        "body": response_body,
+        "isBase64Encoded": is_base64,
+    }

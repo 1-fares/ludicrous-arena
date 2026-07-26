@@ -1,13 +1,13 @@
 #!/bin/bash
-# Package the Lambda and apply it. Terraform uploads the new zip (its hash
+# Package the FC function and apply it. Terraform uploads the new zip (its hash
 # changes), which updates the function in place.
 source "$(dirname "$0")/common.sh"
 
 echo "=== package ==="
-bash "$(dirname "$0")/package-lambda.sh"
+bash "$(dirname "$0")/package-fc.sh"
 
-echo "=== terraform apply (lambda) ==="
+echo "=== terraform apply (function) ==="
 terraform -chdir="$PROJECT_ROOT/terraform" apply -auto-approve \
-  -target=aws_lambda_function.api
+  -target=alicloud_fcv3_function.api
 
-echo "Done. API: $(tf_output api_url)"
+echo "Done. API: $(tf_output fc_url)"

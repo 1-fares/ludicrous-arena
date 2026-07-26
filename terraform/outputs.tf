@@ -1,45 +1,31 @@
-output "api_url" {
-  description = "Base URL agents target (the HTTP API $default stage endpoint)."
-  value       = aws_apigatewayv2_api.main.api_endpoint
+output "fc_url" {
+  description = "Function Compute HTTP trigger URL (the API base agents target)."
+  value       = alicloud_fcv3_trigger.http.http_trigger[0].url_internet
 }
 
-output "viewer_url" {
-  description = "Spectator viewer (CloudFront). Append ?api=<api_url> to point it at the API."
-  value       = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+output "ots_instance" {
+  description = "Tablestore instance name."
+  value       = alicloud_ots_instance.main.name
 }
 
-output "dynamodb_table" {
-  value = aws_dynamodb_table.arena.name
+output "ots_table" {
+  description = "Tablestore table name (pass as ARENA_TABLE to scripts)."
+  value       = alicloud_ots_table.arena.table_name
 }
 
-output "lambda_function" {
-  value = aws_lambda_function.api.function_name
+output "deploy_bucket" {
+  description = "OSS bucket holding the FC function code zip."
+  value       = alicloud_oss_bucket.deploy.bucket
 }
 
-output "frontend_bucket" {
-  value = aws_s3_bucket.frontend.id
+output "sls_project" {
+  description = "SLS log project name."
+  value       = alicloud_log_project.main.project_name
 }
 
-output "cloudfront_distribution_id" {
-  value = aws_cloudfront_distribution.frontend.id
-}
-
-output "route53_zone_id" {
-  description = "Hosted zone id (empty if domain_name is unset)."
-  value       = try(aws_route53_zone.main[0].zone_id, "")
-}
-
-output "nameservers" {
-  description = "Set these as the domain's nameservers at the registrar to delegate DNS."
-  value       = try(aws_route53_zone.main[0].name_servers, [])
-}
-
-output "docs_bucket" {
-  value = try(aws_s3_bucket.docs[0].id, "")
-}
-
-output "docs_distribution_id" {
-  value = try(aws_cloudfront_distribution.docs[0].id, "")
+output "ram_role_arn" {
+  description = "FC service role ARN."
+  value       = alicloud_ram_role.fc.arn
 }
 
 output "site_urls" {
@@ -47,6 +33,5 @@ output "site_urls" {
   value = local.has_domain ? {
     viewer = "https://${var.domain_name}"
     api    = "https://${local.api_domain}"
-    docs   = "https://${local.docs_domain}"
   } : {}
 }

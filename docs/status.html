@@ -92,11 +92,11 @@
         <div class="node"><div class="t">Spectators</div><div class="s">poll the scene endpoint</div></div>
       </div>
       <div class="arrow">&#8595;</div>
-      <div class="node accent" style="min-width:300px"><div class="t">API Gateway HTTP API</div>
-        <div class="s">proxies every path to the Lambda</div><span class="badge0">$0 idle</span></div>
+      <div class="node accent" style="min-width:300px"><div class="t">FC HTTP Trigger</div>
+        <div class="s">proxies every path to the function</div><span class="badge0">$0 idle</span></div>
       <div class="arrow">&#8595;</div>
       <div class="engine">
-        <div class="h">Lambda &nbsp;<span class="mono kv">arena.server:app via Mangum (FastAPI)</span> &nbsp;<span class="badge0">$0 idle</span></div>
+        <div class="h">Function Compute &nbsp;<span class="mono kv">arena.server:app via ASGI adapter (FastAPI)</span> &nbsp;<span class="badge0">$0 idle</span></div>
         <ul>
           <li><b>Engine (stateless)</b> <span class="muted">: load state, fast-forward to now, apply, conditional write</span></li>
           <li><b>Registry</b> <span class="muted">: all game types (skirmish, deathmatch, lockdown, trading_desk)</span></li>
@@ -105,13 +105,12 @@
       </div>
       <div class="arrow">&#8595;</div>
       <div class="tier">
-        <div class="node"><div class="t">DynamoDB</div><div class="s">on-demand single table:<br>tokens, users, match state</div><span class="badge0">$0 idle</span></div>
-        <div class="node"><div class="t">S3 + CloudFront</div><div class="s">static three.js viewer</div><span class="badge0">~$0 idle</span></div>
+        <div class="node"><div class="t">Tablestore (OTS)</div><div class="s">on-demand single table:<br>tokens, users, match state</div><span class="badge0">$0 idle</span></div>
+        <div class="node"><div class="t">OSS + SLS</div><div class="s">deploy artifacts + logs</div><span class="badge0">~$0 idle</span></div>
       </div>
     </div>
     <p style="color:var(--muted);font-size:13.5px">
-      Nothing is always-on. There is no ALB and no container (an ALB alone is
-      ~$16/month and never scales to zero). Cost is proportional to actual reads
+      Nothing is always-on. Cost is proportional to actual reads
       and actions; an idle arena bills essentially nothing.</p>
   </section>
 
@@ -120,7 +119,7 @@
     <div class="panel grid g2">
       <div>
         <p style="margin-top:0">There is no server loop. Match state sits in
-          DynamoDB with the tick and wall-clock time it was last materialized at.
+          Tablestore with the tick and wall-clock time it was last materialized at.
           The simulation is deterministic, so "the world now" is a pure function of
           that state plus elapsed time.</p>
         <ul style="margin:0;padding-left:18px">
@@ -148,10 +147,10 @@
     <div class="panel">
       <table>
         <tr><th>Service</th><th>Idle cost</th><th>Role</th></tr>
-        <tr><td>API Gateway HTTP API</td><td class="zero">$0</td><td>front door, proxies all paths to the Lambda</td></tr>
-        <tr><td>Lambda</td><td class="zero">$0</td><td>the FastAPI app; one invocation per request</td></tr>
-        <tr><td>DynamoDB (on-demand)</td><td class="zero">$0</td><td>tokens, users, match metadata + live state</td></tr>
-        <tr><td>S3 + CloudFront</td><td class="ok">~$0</td><td>static spectator viewer</td></tr>
+        <tr><td>FC HTTP trigger</td><td class="zero">$0</td><td>front door, proxies all paths to the function</td></tr>
+        <tr><td>Function Compute</td><td class="zero">$0</td><td>the FastAPI app; one invocation per request</td></tr>
+        <tr><td>Tablestore (OTS)</td><td class="zero">$0</td><td>tokens, users, match metadata + live state</td></tr>
+        <tr><td>OSS + SLS</td><td class="ok">~$0</td><td>deploy artifacts + logs</td></tr>
         <tr><td><i>(rejected) ALB + Fargate</i></td><td style="color:var(--red)">~$25-35/mo</td><td>always-on; cannot scale to zero, so not used</td></tr>
       </table>
     </div>
@@ -162,7 +161,7 @@
     <div class="panel">
       <table>
         <tr><th>Concern</th><th>File</th></tr>
-        <tr><td>HTTP surface + Lambda handler (Mangum)</td><td class="mono">backend/arena/server.py</td></tr>
+        <tr><td>HTTP surface + FC handler (ASGI adapter)</td><td class="mono">backend/arena/server.py</td></tr>
         <tr><td>On-demand engine: project / apply / lazy-finalize</td><td class="mono">backend/arena/engine.py</td></tr>
         <tr><td>Game extension point (9-method protocol)</td><td class="mono">backend/arena/game.py</td></tr>
         <tr><td>Persistence + optimistic concurrency</td><td class="mono">backend/arena/store.py</td></tr>
@@ -170,7 +169,7 @@
         <tr><td>Bearer-token auth</td><td class="mono">backend/arena/auth.py</td></tr>
         <tr><td>Bundled games</td><td class="mono">backend/arena/games/{skirmish,deathmatch,lockdown,finance}.py</td></tr>
         <tr><td>Spectator viewer (polls the scene endpoint)</td><td class="mono">frontend/</td></tr>
-        <tr><td>AWS infra (API GW + Lambda + DynamoDB + S3/CF)</td><td class="mono">terraform/</td></tr>
+        <tr><td>Aliyun infra (FC + Tablestore + OSS + SLS)</td><td class="mono">terraform/</td></tr>
         <tr><td>Reference agent (stdlib, polls)</td><td class="mono">examples/python-agent/agent.py</td></tr>
       </table>
     </div>
@@ -189,14 +188,14 @@
         <ul>
           <li><span class="dot"></span><span><span class="x">On-demand engine</span><span class="sub">deterministic wall-clock catch-up; reads project, actions persist; lazy finalize</span></span></li>
           <li><span class="dot"></span><span><span class="x">Optimistic concurrency</span><span class="sub">versioned conditional writes serialize concurrent agents, no lock</span></span></li>
-          <li><span class="dot"></span><span><span class="x">State serialization</span><span class="sub">encode/decode round-trips every game's state through DynamoDB JSON</span></span></li>
+          <li><span class="dot"></span><span><span class="x">State serialization</span><span class="sub">encode/decode round-trips every game's state through Tablestore JSON</span></span></li>
           <li><span class="dot"></span><span><span class="x">Pluggable game framework</span><span class="sub">Game protocol + registry; four games sharing nothing but the interface</span></span></li>
           <li><span class="dot"></span><span><span class="x">HTTP API + token auth</span><span class="sub">discovery, lobby, join/start, state poll, scene poll, action submit; hashed tokens</span></span></li>
           <li><span class="dot"></span><span><span class="x">Four games</span><span class="sub">skirmish (headline grid-maze shooter), deathmatch, lockdown (coop fog of war), trading_desk (industry scenario)</span></span></li>
           <li><span class="dot"></span><span><span class="x">Review hardening</span><span class="sub">6-agent review applied: non-finite-input guards, rejected-feedback merge, no config leak, single meta-load on the hot path, viewer smoothing</span></span></li>
           <li><span class="dot"></span><span><span class="x">three.js viewer</span><span class="sub">polls the scene endpoint, per-game renderers, scoreboard, result banner</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Serverless Terraform</span><span class="sub">API Gateway + Lambda + DynamoDB + S3/CloudFront; validates clean</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Reference agent + scripts</span><span class="sub">stdlib polling agent; run-local, test, package-lambda, deploy, issue-token</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Serverless Terraform</span><span class="sub">FC + Tablestore + OSS + SLS; validates clean</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Reference agent + scripts</span><span class="sub">stdlib polling agent; run-local, test, package-fc, deploy, issue-token</span></span></li>
         </ul>
       </div>
       <div class="panel status todo">
@@ -205,10 +204,10 @@
         <ul>
           <li><span class="dot"></span><span><span class="x">Rest of the scenario family</span><span class="sub">financial services is built; energy, ecommerce, government, logistics remain (plus a ScenarioGame base to extract)</span></span></li>
           <li><span class="dot"></span><span><span class="x">Business sim</span><span class="sub">Ports of Call-style; would set <code>realtime=False</code> (one tick per action)</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Match GC via DynamoDB TTL</span><span class="sub">finished matches and dead lobbies are not evicted yet</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Rate limiting</span><span class="sub">cap requests per token at the API Gateway / Lambda edge</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Replays + history</span><span class="sub">append per-tick frames to S3; history endpoint from RESULT records</span></span></li>
-          <li><span class="dot"></span><span><span class="x">Custom domains + alerts</span><span class="sub">API Gateway domain + ACM; SNS billing/health alarms (placeholder var)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Match GC</span><span class="sub">finished matches and dead lobbies are not evicted yet (Tablestore TTL is table-wide)</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Rate limiting</span><span class="sub">cap requests per token at the FC trigger edge</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Replays + history</span><span class="sub">append per-tick frames to OSS; history endpoint from RESULT records</span></span></li>
+          <li><span class="dot"></span><span><span class="x">Custom domains + alerts</span><span class="sub">FC custom domain + TLS cert; CloudMonitor billing/health alarms</span></span></li>
           <li><span class="dot"></span><span><span class="x">Cold-start mitigation</span><span class="sub">provisioned concurrency if first-request latency ever matters (adds idle cost)</span></span></li>
           <li><span class="dot"></span><span><span class="x">Viewer camera controls</span><span class="sub">orbit/zoom; currently a slow auto-orbit</span></span></li>
         </ul>
@@ -298,7 +297,7 @@
           requirement is near-zero idle. An ALB plus a Fargate task is ~$25-35/month
           even with no players, so the design uses only services that bill per use
           and scale to zero.</p>
-        <p><b>On-demand simulation, no loop.</b> Lambda is request/response, so the
+        <p><b>On-demand simulation, no loop.</b> Function Compute is request/response, so the
           world is advanced lazily inside request handlers. Deterministic games make
           "the world now" a pure function of the last state and elapsed time.</p>
       </div>
@@ -307,8 +306,8 @@
           acting at once both succeed: the loser of the version check reloads (now
           including the winner's effect) and re-applies. Bounded by small rosters.</p>
         <p><b>Same app everywhere.</b> The identical FastAPI app runs locally under
-          uvicorn against an in-memory store and in Lambda against DynamoDB; only the
-          store and entrypoint differ, so dev and tests need no AWS.</p>
+          uvicorn against an in-memory store and in FC against Tablestore; only the
+          store and entrypoint differ, so dev and tests need no cloud services.</p>
       </div>
     </div>
   </section>

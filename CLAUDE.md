@@ -13,16 +13,16 @@ one is [docs/GAMES.md](docs/GAMES.md).
 ## Stack and the cost constraint
 
 The governing requirement is **near-zero cost when idle**. That forbids anything
-always-on (an ALB is ~$16/mo and never scales to zero; a Fargate task bills per
-running hour). So the whole thing is built from scale-to-zero services:
+always-on. So the whole thing is built from scale-to-zero services on Alibaba
+Cloud (Aliyun):
 
-- **API**: one Lambda running the FastAPI app via Mangum, behind an **API Gateway
-  HTTP API**. Python 3.13, Pydantic v2.
-- **State**: **DynamoDB** on-demand, single table (`pk`/`sk`). Holds tokens,
-  users, match metadata, and the serialized live match state. Nothing lives in
-  process memory between requests.
-- **Viewer**: three.js via a pinned CDN import map, no build step, on **S3 +
-  CloudFront**. It polls; there is no WebSocket.
+- **API**: one Function Compute (FC 3.0) function running the FastAPI app via an
+  ASGI adapter, with a built-in HTTP trigger. Python 3.12, Pydantic v2.
+- **State**: **Tablestore (OTS)** on-demand, single table (`pk`/`sk`). Holds
+  tokens, users, match metadata, and the serialized live match state. Nothing
+  lives in process memory between requests.
+- **Viewer**: three.js via a pinned CDN import map, no build step, bundled in
+  the FC package and served by the same function. It polls; there is no WebSocket.
 
 Idle cost is ~$0. Active cost is proportional to reads and actions.
 
@@ -44,21 +44,21 @@ read/action boundaries, and the viewer interpolates between polls.
 
 ```
 backend/arena/
-  server.py     FastAPI app (sync handlers) + Mangum `handler`. The public API.
+  server.py     FastAPI app (sync handlers) + FC 3.0 ASGI `handler`. The public API.
   engine.py     Stateless engine: project / apply / lazy-finalize over the store.
   game.py       Game Protocol, the extension point (9 methods incl. encode/decode).
   models.py     Pydantic wire schemas.
   registry.py   game id -> Game lookup.
-  store.py      MemoryStore (dev/tests) + DynamoStore; versioned match meta/state.
+  store.py      MemoryStore (dev/tests) + OTSStore; versioned match meta/state.
   auth.py       Bearer-token dependency.
   games/        skirmish.py (headline: grid-maze tactical shooter, facing+vision),
                 deathmatch.py (adversarial), lockdown.py (coop, fog),
                 finance.py (trading_desk: turn-paced industry scenario).
   config.py     merge_defaults: shared config-defaults helper for games.
 frontend/       index.html + js/viewer.js (polls GET .../scene).
-terraform/      main, variables, lambda, apigateway, iam, dynamodb, s3, cloudfront, outputs.
+terraform/      main, variables, fc, ots, oss, ram, sls, domain, outputs.
 examples/python-agent/agent.py   stdlib reference agent (polls state, posts actions).
-scripts/        run-local, test, package-lambda, deploy*, logs, issue-token.
+scripts/        run-local, test, package-fc, deploy*, logs, issue-token.
 tests/          test_games.py (rules + serialization), test_engine.py (engine),
                 test_api.py (HTTP surface).
 ```
@@ -68,14 +68,14 @@ tests/          test_games.py (rules + serialization), test_engine.py (engine),
 ```bash
 scripts/run-local.sh [port]     # local arena, in-memory store, dev tokens seeded
 scripts/test.sh                 # pytest (37 tests: rules, serialization, engine, HTTP)
-scripts/package-lambda.sh       # build backend/build/lambda.zip for the Lambda runtime
-scripts/deploy.sh               # tests -> package -> terraform apply -> frontend
-scripts/issue-token.py --user <id> --name <name>   # mint a token (needs AWS creds)
+scripts/package-fc.sh           # build backend/build/fc.zip for the FC runtime
+scripts/deploy.sh               # tests -> package -> terraform apply
+scripts/issue-token.py --user <id> --name <name>   # mint a token (needs Aliyun creds)
 ```
 
 Local dev tokens (memory store): `dev-token`, `dev-token-2`, `dev-token-3`,
 `dev-token-4`. Each maps to a distinct user (joins dedupe by user). Local dev runs
-the identical app under uvicorn against `MemoryStore`, so no DynamoDB is needed.
+the identical app under uvicorn against `MemoryStore`, so no Tablestore is needed.
 
 ## The game framework (how to extend)
 
@@ -90,7 +90,7 @@ in [docs/GAMES.md](docs/GAMES.md#adding-a-game). Non-negotiable rules:
 - Be **deterministic**: the engine fast-forwards `tick` to catch up to now, so the
   same starting state and elapsed time must always produce the same world.
 - `encode_state`/`decode_state` must be exact inverses and JSON-safe (state
-  round-trips through DynamoDB on every action). Flatten sets/tuples to lists.
+  round-trips through Tablestore on every action). Flatten sets/tuples to lists.
 - Fog of war goes in `observe` (per-agent, partial); `render` is the omniscient
   spectator view. Both return JSON-safe dicts.
 
@@ -98,7 +98,7 @@ in [docs/GAMES.md](docs/GAMES.md#adding-a-game). Non-negotiable rules:
 
 - **There is no server loop and no in-memory match.** Anything that needs the
   world to advance must go through the engine's project/apply path. Do not add
-  background tasks; they would not run in Lambda.
+  background tasks; they would not run in Function Compute.
 - **Reads do not persist; actions do.** A read computes the projected world and
   returns it without writing. State only advances durably on an action (or a lazy
   finalize when a read first observes the end).
@@ -109,31 +109,31 @@ in [docs/GAMES.md](docs/GAMES.md#adding-a-game). Non-negotiable rules:
   with a loop.
 - **Per-tick collision is sampled.** Fast projectiles can tunnel between ticks;
   that is a tuning parameter (`projectile_speed` vs `tick_rate`), not a bug.
-- **The Lambda package omits boto3 and uvicorn.** boto3 is in the Lambda runtime;
-  uvicorn is local-only (the `[local]` extra). `package-lambda.sh` builds Linux
-  wheels via `uv pip install --python-platform x86_64-manylinux2014` so
-  pydantic-core's binary matches the runtime.
+- **The FC package omits uvicorn.** uvicorn is local-only (the `[local]` extra).
+  `package-fc.sh` builds Linux wheels via `uv pip install --python-platform
+  x86_64-manylinux2014` so pydantic-core's binary matches the runtime.
 
 ## Conventions
 
 - Tokens stored only as SHA-256 hashes; plaintext shown once at issue time. Auth
   is the token, no sessions.
-- Single DynamoDB table; layout documented at the top of `store.py` and in
+- Single Tablestore table; layout documented at the top of `store.py` and in
   ARCHITECTURE.md.
 - Tests: drive games directly for rules + serialization; drive the engine with an
   injected clock for the simulation; TestClient for the HTTP surface. Keep all
-  three green. No AWS needed (MemoryStore mirrors DynamoStore semantics).
+  three green. No Aliyun needed (MemoryStore mirrors OTSStore semantics).
 - Frontend stays buildless: add a renderer to `viewer.js` keyed by `game_id`.
-- Terraform default region `eu-central-2` (Zurich); remote state is in the S3
-  backend in `main.tf` (bucket `arena-tfstate-ACCOUNT_ID`, eu-central-2). Run
-  `package-lambda.sh` before the first `terraform apply` (the Lambda resource needs
-  the zip to exist). Deployment topology and domains are in [docs/DEPLOY.md](docs/DEPLOY.md).
-- **API kill switch**: `terraform/api-switch.auto.tfvars` sets `api_enabled`. `false`
-  pins the Lambda's `reserved_concurrent_executions` to 0, so API Gateway cannot
-  invoke it: wrong-token and random internet requests run no code and read no
-  DynamoDB, holding cost near zero while idle. Flip to `true` and re-apply
-  (`scripts/deploy.sh`) to re-enable play. The committed value is the live on/off
-  state. While off, the static viewer still loads but its data calls return errors.
+- Terraform default region `ap-southeast-1` (Singapore); remote state is in the
+  OSS backend in `main.tf` (bucket `arena-tfstate-aliyun`). Run `package-fc.sh`
+  before the first `terraform apply` (the FC resource needs the zip to exist).
+  Deployment topology and domains are in [docs/DEPLOY.md](docs/DEPLOY.md).
+- **API kill switch**: `terraform/api-switch.auto.tfvars` sets `api_enabled`.
+  `false` sets the FC function's `API_ENABLED` env var to `false`, so the handler
+  returns 503 for every API call: wrong-token and random internet requests run no
+  game code and read no Tablestore, holding cost near zero while idle. Flip to
+  `true` and re-apply (`scripts/deploy.sh`) to re-enable play. The committed value
+  is the live on/off state. While off, the static viewer still loads but its data
+  calls return errors.
 
 ## Status
 

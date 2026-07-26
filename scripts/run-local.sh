@@ -10,7 +10,7 @@ cd "$PROJECT_ROOT/backend"
 
 if [[ ! -d .venv ]]; then
   uv venv
-  uv pip install -e ".[local]"  # core deps + uvicorn (the Lambda package omits uvicorn)
+  uv pip install -e ".[local]"  # core deps + uvicorn (the FC package omits uvicorn)
 fi
 
 echo "Arena on http://localhost:$PORT  (store=memory, tokens: dev-token[-2..4])"

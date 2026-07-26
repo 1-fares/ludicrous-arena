@@ -2,7 +2,8 @@
 survive between requests, because no match lives in process memory: tokens, users,
 match metadata (roster, phase, result), and the serialized live match state.
 
-Single-table DynamoDB layout (table from ``ARENA_TABLE``, default ``arena``):
+Single-table Tablestore (OTS) layout (table from ``ARENA_TABLE``, default
+``arena``):
 
     pk                       sk                attributes
     TOKEN#<sha256(token)>    -                 user_id, label, revoked, created_at
@@ -161,63 +162,125 @@ class MemoryStore:
         self._index.pop(match_id, None)
 
 
-class DynamoStore:
-    def __init__(self, table_name: Optional[str] = None) -> None:
-        import boto3
-        from botocore.exceptions import ClientError
+class OTSStore:
+    """Tablestore (OTS) store. Same single-table pk/sk layout as the old
+    DynamoDB design; the conditional version check maps to an OTS
+    SingleColumnCondition. Credentials come from the FC function's STS role
+    (injected as environment variables by the runtime)."""
 
-        self._ClientError = ClientError
+    def __init__(self, table_name: Optional[str] = None) -> None:
+        from tablestore import (
+            OTSClient,
+            Row,
+            Condition,
+            RowExistenceExpectation,
+            SingleColumnCondition,
+            ComparatorType,
+            Direction,
+            INF_MIN,
+            INF_MAX,
+        )
+        from tablestore.error import OTSServiceError
+
+        self._Row = Row
+        self._Condition = Condition
+        self._RowExistenceExpectation = RowExistenceExpectation
+        self._SingleColumnCondition = SingleColumnCondition
+        self._ComparatorType = ComparatorType
+        self._Direction = Direction
+        self._INF_MIN = INF_MIN
+        self._INF_MAX = INF_MAX
+        self._OTSServiceError = OTSServiceError
+
         # Default matches the deployed table name (terraform project_prefix "arena").
-        # The Lambda always gets ARENA_TABLE injected; this default is for the CLI.
+        # The FC function always gets ARENA_TABLE injected; this default is for the CLI.
         self.table_name = table_name or os.environ.get("ARENA_TABLE", "arena")
-        self._table = boto3.resource("dynamodb").Table(self.table_name)
+
+        endpoint = os.environ["OTS_ENDPOINT"]
+        instance = os.environ["OTS_INSTANCE"]
+        ak_id = os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"]
+        ak_secret = os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"]
+        sts_token = os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN")
+        self._client = OTSClient(endpoint, ak_id, ak_secret, instance, sts_token=sts_token)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _get_row(self, pk: str, sk: str) -> Optional[dict[str, Any]]:
+        _, row, _ = self._client.get_row(
+            self.table_name, [("pk", pk), ("sk", sk)], [])
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def _put_row(self, pk: str, sk: str, attrs: list[tuple[str, Any]]) -> None:
+        row = self._Row([("pk", pk), ("sk", sk)], attrs)
+        condition = self._Condition(self._RowExistenceExpectation.IGNORE)
+        self._client.put_row(self.table_name, row, condition)
+
+    def _delete_row(self, pk: str, sk: str) -> None:
+        row = self._Row([("pk", pk), ("sk", sk)])
+        condition = self._Condition(self._RowExistenceExpectation.IGNORE)
+        self._client.delete_row(self.table_name, row, condition)
+
+    @staticmethod
+    def _row_to_dict(row) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        for name, value in row.primary_key:
+            d[name] = value
+        for name, value, *_ in row.attribute_columns:
+            d[name] = value
+        return d
+
+    # -- Store interface ---------------------------------------------------
 
     def resolve_token(self, token: str) -> Optional[_Identity]:
-        item = self._table.get_item(Key={"pk": f"TOKEN#{hash_token(token)}", "sk": "-"}).get("Item")
+        item = self._get_row(f"TOKEN#{hash_token(token)}", "-")
         if not item or item.get("revoked"):
             return None
         uid = item["user_id"]
-        u = self._table.get_item(Key={"pk": f"USER#{uid}", "sk": "-"}).get("Item") or {}
+        u = self._get_row(f"USER#{uid}", "-") or {}
         return _Identity(uid, u.get("display_name", uid), bool(item.get("admin")))
 
     def put_user(self, user_id: str, display_name: str) -> None:
-        self._table.put_item(Item={"pk": f"USER#{user_id}", "sk": "-",
-                                   "display_name": display_name, "created_at": int(time.time())})
+        self._put_row(f"USER#{user_id}", "-",
+                      [("display_name", display_name), ("created_at", int(time.time()))])
 
     def put_token(self, token: str, user_id: str, label: str, admin: bool = False) -> None:
-        self._table.put_item(Item={"pk": f"TOKEN#{hash_token(token)}", "sk": "-",
-                                   "user_id": user_id, "label": label, "admin": admin,
-                                   "revoked": False, "created_at": int(time.time())})
+        self._put_row(f"TOKEN#{hash_token(token)}", "-",
+                      [("user_id", user_id), ("label", label), ("admin", admin),
+                       ("revoked", False), ("created_at", int(time.time()))])
 
     def save_match_result(self, match_id: str, game_id: str, result: dict[str, Any]) -> None:
-        self._table.put_item(Item={"pk": f"MATCH#{match_id}", "sk": "RESULT",
-                                   "game_id": game_id, "result": _dumps(result),
-                                   "finished_at": int(time.time()),
-                                   "ttl": int(time.time()) + _MATCH_TTL})
+        self._put_row(f"MATCH#{match_id}", "RESULT",
+                      [("game_id", game_id), ("result", _dumps(result)),
+                       ("finished_at", int(time.time())),
+                       ("ttl", int(time.time()) + _MATCH_TTL)])
 
     def _get(self, match_id: str, sk: str):
-        item = self._table.get_item(Key={"pk": f"MATCH#{match_id}", "sk": sk}).get("Item")
+        item = self._get_row(f"MATCH#{match_id}", sk)
         if not item:
             return None
         return json.loads(item["data"]), int(item["version"])
 
     def _put(self, match_id: str, sk: str, data: dict[str, Any], expected_version):
         new_ver = (expected_version or 0) + 1
-        item = {"pk": f"MATCH#{match_id}", "sk": sk, "data": _dumps(data), "version": new_ver,
-                "ttl": int(time.time()) + _MATCH_TTL}  # refreshed on every write; reaps abandoned matches
+        pk = [("pk", f"MATCH#{match_id}"), ("sk", sk)]
+        attrs = [("data", _dumps(data)), ("version", new_ver),
+                 ("ttl", int(time.time()) + _MATCH_TTL)]
+        row = self._Row(pk, attrs)
         try:
             if expected_version is None:
-                # First write of this (pk, sk) item. The condition is evaluated
-                # against the specific item, not the partition, so checking sk is
-                # the clearer "this item does not exist yet" guard (META for the
-                # same pk may already exist when STATE is first written).
-                self._table.put_item(Item=item, ConditionExpression="attribute_not_exists(sk)")
+                # First write of this (pk, sk) row: the row must not exist yet.
+                condition = self._Condition(self._RowExistenceExpectation.EXPECT_NOT_EXIST)
             else:
-                self._table.put_item(Item=item,
-                                     ConditionExpression="version = :v",
-                                     ExpressionAttributeValues={":v": expected_version})
-        except self._ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                # Update: the row must exist AND carry the expected version.
+                condition = self._Condition(
+                    self._RowExistenceExpectation.EXPECT_EXIST,
+                    self._SingleColumnCondition(
+                        "version", expected_version, self._ComparatorType.EQUAL))
+            self._client.put_row(self.table_name, row, condition)
+        except self._OTSServiceError as e:
+            if e.code == "OTSConditionCheckFail":
                 raise Conflict(f"{sk} version mismatch (expected {expected_version})") from None
             raise
         return new_ver
@@ -239,28 +302,34 @@ class DynamoStore:
         return self._put(match_id, "STATE", asdict(rec), expected_version)
 
     def update_match_index(self, match_id: str, game_id: str, phase: str) -> None:
-        self._table.put_item(Item={"pk": "INDEX#MATCHES", "sk": f"MATCH#{match_id}",
-                                   "game_id": game_id, "phase": phase,
-                                   "ttl": int(time.time()) + _MATCH_TTL})
+        self._put_row("INDEX#MATCHES", f"MATCH#{match_id}",
+                      [("game_id", game_id), ("phase", phase),
+                       ("ttl", int(time.time()) + _MATCH_TTL)])
 
     def list_match_index(self) -> list[dict[str, Any]]:
-        resp = self._table.query(
-            KeyConditionExpression="pk = :p",
-            ExpressionAttributeValues={":p": "INDEX#MATCHES"})
-        return [{"match_id": i["sk"].split("#", 1)[1], "game_id": i["game_id"], "phase": i["phase"]}
-                for i in resp.get("Items", [])]
+        start_pk = [("pk", "INDEX#MATCHES"), ("sk", self._INF_MIN)]
+        end_pk = [("pk", "INDEX#MATCHES"), ("sk", self._INF_MAX)]
+        _, _, rows, _ = self._client.get_range(
+            self.table_name, self._Direction.FORWARD, start_pk, end_pk,
+            columns_to_get=[], limit=None)
+        out = []
+        for row in rows:
+            d = self._row_to_dict(row)
+            out.append({"match_id": d["sk"].split("#", 1)[1],
+                        "game_id": d["game_id"], "phase": d["phase"]})
+        return out
 
     def delete_match(self, match_id: str) -> None:
-        # Remove the three per-match items and the index pointer.
+        # Remove the three per-match rows and the index pointer.
         for sk in ("META", "STATE", "RESULT"):
-            self._table.delete_item(Key={"pk": f"MATCH#{match_id}", "sk": sk})
-        self._table.delete_item(Key={"pk": "INDEX#MATCHES", "sk": f"MATCH#{match_id}"})
+            self._delete_row(f"MATCH#{match_id}", sk)
+        self._delete_row("INDEX#MATCHES", f"MATCH#{match_id}")
 
 
 def from_env() -> Store:
     kind = os.environ.get("ARENA_STORE", "memory").lower()
-    if kind == "dynamo":
-        return DynamoStore()
+    if kind == "ots":
+        return OTSStore()
     store = MemoryStore()
     # Seed dev identities so local multi-agent play works out of the box.
     base = os.environ.get("ARENA_DEV_TOKEN", "dev-token")  # plus dev-token-2..4 below

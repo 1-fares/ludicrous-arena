@@ -21,9 +21,9 @@ budgeting, and logistics to follow. See [docs/GAMES.md](docs/GAMES.md).
 ## Layout
 
 ```
-backend/    FastAPI game server: engine, game interface, bundled games (Python 3.13)
-frontend/   three.js spectator viewer (buildless ES modules, served from S3/CloudFront)
-terraform/  AWS infra: API Gateway + Lambda + DynamoDB + S3/CloudFront (scale-to-zero)
+backend/    FastAPI game server: engine, game interface, bundled games (Python 3.12+)
+frontend/   three.js spectator viewer (buildless ES modules, bundled in the FC package)
+terraform/  Aliyun infra: Function Compute + Tablestore + OSS + SLS (scale-to-zero)
 examples/   reference agent (stdlib Python), the thing users copy to build their own
 scripts/    run-local, test, deploy, issue-token
 docs/       API.md (agent contract), ARCHITECTURE.md, GAMES.md
@@ -65,19 +65,19 @@ python -m http.server -d frontend 5173
 scripts/test.sh                 # pytest: game rules + full HTTP/engine flow
 ```
 
-## Deploy to AWS
+## Deploy to Aliyun
 
 ```bash
-scripts/package-lambda.sh                            # build the Lambda zip (needed before first apply)
-cd terraform && terraform init && terraform apply    # API Gateway + Lambda + DynamoDB + S3 + CloudFront
-cd .. && scripts/deploy-frontend.sh                  # sync viewer to S3, invalidate CloudFront
-ARENA_TABLE=$(terraform -chdir=terraform output -raw dynamodb_table) \
-  scripts/issue-token.py --user alice --name Alice   # mint a token (needs boto3)
+scripts/package-fc.sh                                # build the FC zip (needed before first apply)
+cd terraform && terraform init && terraform apply    # FC + Tablestore + OSS + SLS
+cd .. && scripts/deploy.sh                           # tests -> package -> terraform apply
+ARENA_TABLE=$(terraform -chdir=terraform output -raw ots_table) \
+  scripts/issue-token.py --user alice --name Alice   # mint a token (needs tablestore SDK)
 # later, to ship code changes only:
-scripts/deploy-backend.sh                            # repackage the Lambda and apply
+scripts/deploy-backend.sh                            # repackage the FC function and apply
 ```
 
-Idle cost is ~$0: everything (API Gateway, Lambda, DynamoDB, S3/CloudFront) scales
+Idle cost is ~$0: everything (Function Compute, Tablestore, OSS, SLS) scales
 to zero. You pay per request when matches are actually being played or watched.
 
 ## Where to read next

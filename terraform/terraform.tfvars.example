@@ -1,10 +1,15 @@
 # Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
-aws_region     = "eu-central-2"
+region         = "ap-southeast-1"
 project_prefix = "arena"
 
-# Built by scripts/package-lambda.sh (run it before the first apply).
-lambda_zip = "../backend/build/lambda.zip"
+# Built by scripts/package-fc.sh (run it before the first apply).
+function_zip = "../backend/build/fc.zip"
+
+# Custom domain (Phase 2). Leave empty to skip.
+# domain_name = "ludicrous-arena.com"
+# cert_path   = "/path/to/fullchain.pem"
+# key_path    = "/path/to/key.pk8.pem"
 
 # Tuning (optional):
-# lambda_memory  = 512
-# lambda_timeout = 15
+# function_memory  = 512
+# function_timeout = 60

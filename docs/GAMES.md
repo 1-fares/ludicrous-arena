@@ -349,7 +349,7 @@ viewer feed, you write only rules.
      to now on every read/action, so identical state + elapsed time must always
      produce the same result (no wall-clock reads, no unseeded randomness);
    - `encode_state`/`decode_state` must be exact inverses and JSON-safe (state is
-     persisted to DynamoDB between every action); flatten sets/tuples to lists;
+     persisted to Tablestore between every action); flatten sets/tuples to lists;
    - put fog of war in `observe`; `render` is the omniscient spectator view;
    - both `observe` and `render` must return JSON-safe dicts.
 4. `register(YourGame())` at module bottom.

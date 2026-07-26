@@ -1,7 +1,7 @@
 """The simulation, evaluated on demand.
 
 There is no server loop and nothing lives in memory between requests. The
-authoritative state of a match sits in DynamoDB; the engine advances it lazily:
+authoritative state of a match sits in Tablestore; the engine advances it lazily:
 
 - On a **read** (agent observation or spectator scene) the engine loads the
   persisted state, fast-forwards the deterministic simulation to *now* in memory,
@@ -19,7 +19,7 @@ so a fixed per-call cap (``_MAX_CATCHUP``) bounds the work instead: a match nobo
 has touched for longer than that many ticks is treated as paused at the bound
 rather than fast-forwarded across the whole idle gap. Without the cap, an
 abandoned endless match would re-simulate every tick since it was last persisted
-on *every* read (days of wall clock at the tick rate), timing out the Lambda.
+on *every* read (days of wall clock at the tick rate), timing out the function.
 
 Note on finished matches: once a match ends, META holds the terminal result and
 STATE is no longer advanced. Reads still recompute ``result`` from STATE, but
@@ -28,7 +28,7 @@ projection from the same STATE reaches the identical ``finished_tick`` -- META's
 stored result and any recomputation agree. STATE.last_tick lagging META is
 therefore harmless; STATE is the durable seed, not a second source of truth.
 
-This is what lets the whole service be Lambda + DynamoDB: zero cost when nobody is
+This is what lets the whole service be Function Compute + Tablestore: zero cost when nobody is
 playing, cost proportional to actual reads and actions when they are.
 """
 
@@ -50,14 +50,14 @@ from arena.store import Conflict, StateRecord, Store
 # *endless* matches: a real-time game advances by wall-clock elapsed time on each
 # read, but a game that never fires a ``result`` (skirmish defaults to endless,
 # ``rounds_to_win=0``) would otherwise re-simulate the entire idle gap on every read
-# of an abandoned running match (days -> millions of ticks) and time out the Lambda.
+# of an abandoned running match (days -> millions of ticks) and time out the function.
 # Must be a fixed tick count, not a wall-clock compute budget: every caller has to
 # project the identical world for the read/action agreement to hold, and a
 # time-based budget would make the projected tick depend on how fast the host ran.
 # Sized above the largest finite-match horizon (deathmatch ``time_limit_ticks``
 # defaults to 6000) so a finite match still finalizes on an idle read, yet low
 # enough that a full cap of the heaviest game (skirmish) simulates well within the
-# Lambda timeout. A match idle past this many ticks is treated as paused at the
+# function timeout. A match idle past this many ticks is treated as paused at the
 # bound; the next write snaps its wall clock forward (see submit_actions).
 _MAX_CATCHUP = 8000
 _MAX_ACTIONS = 256      # per-submission action cap, bounds per-request work
@@ -65,7 +65,7 @@ _RETRY = 10             # optimistic-write attempts before giving up (higher: mo
 
 # Safety ceiling on a match roster. There is no small gameplay cap on players -- a
 # match takes as many as join -- but the whole live match state serializes into one
-# DynamoDB item (400 KB hard limit), so the roster must stay well under what would
+# Tablestore row (4 MB hard limit), so the roster must stay well under what would
 # blow that. At a few hundred bytes per fighter this leaves comfortable headroom.
 # Games advertise their own max_players (also large); the effective cap is the lower
 # of the two. This is a guard against silent item-too-large write failures, not a
