@@ -21,7 +21,8 @@ const API = new URLSearchParams(location.search).get("api")
   || (location.hostname === "localhost" || location.hostname === "127.0.0.1"
         ? "http://localhost:8080"
         : "https://api.ludicrous-arena.com");
-const POLL_HZ = 8;
+const POLL_HZ = 4;
+const INFO_EVERY = 5;   // fetch match info every Nth poll; scene is fetched every poll
 
 const PALETTE = [0x7cc4ff, 0xff7c7c, 0x9cff7c, 0xffd27c, 0xc77cff, 0x7cffe1, 0xff7cd2, 0xe1ff7c];
 const statusEl = document.getElementById("status");
@@ -1322,20 +1323,36 @@ function connect(matchId, gameId) {
   if (!r) { statusEl.textContent = `no renderer for game '${gameId}'`; return; }
   let rosterMap = null;   // player_id -> name, to toast joins/drops (null = first poll, seed quietly)
   let finishedAt = 0;     // when this match first read as finished, to time the held-banner safety window
+  let pollCount = 0;
+  let lastInfo = null;
 
   async function poll() {
     try {
-      const [sceneR, infoR] = await Promise.all([
-        fetch(`${API}/v1/matches/${matchId}/scene`),
-        fetch(`${API}/v1/matches/${matchId}`),
-      ]);
-      if (sceneR.status === 404 || infoR.status === 404) {
-        currentMatch = null;                       // gone (deleted/GC'd): the resolver repicks
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-        return;
+      const wantInfo = pollCount++ % INFO_EVERY === 0 || !lastInfo;
+      let frame, info;
+      if (wantInfo) {
+        const [sceneR, infoR] = await Promise.all([
+          fetch(`${API}/v1/matches/${matchId}/scene`),
+          fetch(`${API}/v1/matches/${matchId}`),
+        ]);
+        if (sceneR.status === 404 || infoR.status === 404) {
+          currentMatch = null;                       // gone (deleted/GC'd): the resolver repicks
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          return;
+        }
+        frame = await sceneR.json();
+        info = await infoR.json();
+        lastInfo = info;
+      } else {
+        const sceneR = await fetch(`${API}/v1/matches/${matchId}/scene`);
+        if (sceneR.status === 404) {
+          currentMatch = null;
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          return;
+        }
+        frame = await sceneR.json();
+        info = lastInfo;
       }
-      const frame = await sceneR.json();
-      const info = await infoR.json();
       updateAdminControls(info);
       // Toast players as they connect / drop, so you see the lobby fill one by one.
       const cur = new Map(info.players.map(p => [p.player_id, p.display_name]));
@@ -1446,7 +1463,18 @@ async function resolveArena() {
     showEmpty();
   }
 }
-setInterval(resolveArena, 2500);
+let arenaTimer = setInterval(resolveArena, 2500);
+
+// Stop all polling when the tab is hidden; resume when it becomes visible again.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (arenaTimer) { clearInterval(arenaTimer); arenaTimer = null; }
+  } else {
+    if (!arenaTimer) arenaTimer = setInterval(resolveArena, 2500);
+    if (currentMatch && !pollTimer) connect(currentMatch, currentGame);
+  }
+});
 
 // ---- admin controls (revealed by an admin token) -------------------------
 function updateAdminControls(info) {
