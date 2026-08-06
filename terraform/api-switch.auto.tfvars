@@ -11,4 +11,4 @@
 # To toggle: edit the line below, then `scripts/deploy.sh` (or
 # `terraform -chdir=terraform apply -auto-approve`). Committed on purpose so the
 # current on/off state is visible in the repo.
-api_enabled = true
+api_enabled = false
